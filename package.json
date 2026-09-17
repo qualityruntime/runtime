@@ -1,0 +1,17 @@
+{
+  "name": "@qualityruntime/runtime",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "check": "vp check",
+    "fmt": "vp fmt",
+    "lint": "vp lint"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^7.0.2",
+    "vite-plus": "^0.3.2"
+  },
+  "packageManager": "bun@1.4.2"
+}

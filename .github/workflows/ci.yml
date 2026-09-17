@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: 2026 Quality Runtime contributors
+# SPDX-License-Identifier: Apache-2.0
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+
+  dco:
+    # Trust is PR-level: the GitHub App is the only identity that can open a PR
+    # as itself. Commit author fields are self-reported and must not gate this.
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.user.login != 'qualityruntime[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check Developer Certificate of Origin sign-off
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Fail loudly rather than passing an unchecked range if either end
+          # of the range is missing (e.g. an unexpected fork checkout).
+          for end in "$BASE" "$HEAD"; do
+            git cat-file -e "$end^{commit}" 2>/dev/null || {
+              echo "Cannot resolve $end in this checkout"
+              exit 1
+            }
+          done
+          status=0
+          for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            if ! git log -1 --format='%B' "$sha" | grep -qiE '^Signed-off-by: .+ <.+@.+>'; then
+              echo "Missing Signed-off-by: $(git log -1 --format='%h %s' "$sha")"
+              status=1
+            fi
+          done
+          exit $status

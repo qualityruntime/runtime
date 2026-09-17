@@ -1,0 +1,12 @@
+version = 1
+SPDX-PackageName = "Quality Runtime"
+SPDX-PackageDownloadLocation = "https://github.com/qualityruntime/runtime"
+
+# Fallback for files that can't carry an SPDX header, or where one would be
+# noise. Default "closest" precedence lets a file's own notice win. Source
+# files are deliberately not matched so `reuse lint` flags missing headers
+# (see AGENTS.md); add assets such as images with deliberate licensing.
+[[annotations]]
+path = ["**/*.md", "**/*.json", "**/*.lock", ".gitignore", "NOTICE"]
+SPDX-FileCopyrightText = "2026 Quality Runtime contributors"
+SPDX-License-Identifier = "Apache-2.0"

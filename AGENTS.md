@@ -31,6 +31,8 @@ Read `ARCHITECTURE.md` before making structural changes.
 
 Deployment adapters may depend on core code; core code must not depend on deployment adapters or provider-specific concerns such as Cloudflare.
 
+Apps go in `apps/`, shared code in `packages/` — extract a package only when the boundary is real.
+
 ## Changes
 
 - Make the smallest coherent change that solves the problem.
@@ -67,4 +69,4 @@ Hosted-service concerns such as billing, metering, customer provisioning, and in
 
 ## Before finishing
 
-Run `bun run check` (Vite+ format, lint, and type checks) and `uvx --from 'reuse[charset-normalizer]' reuse lint`.
+Run `bun run check` (Vite+ format, lint, and type checks), `bun run test`, and `uvx --from 'reuse[charset-normalizer]' reuse lint`.

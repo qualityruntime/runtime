@@ -16,27 +16,49 @@ Install dependencies:
 bun install
 ```
 
-Create the required local environment configuration from the provided example when one exists.
-
 ## Development
 
 ```sh
 bun run check   # format, lint, and type checks
 bun run fmt     # apply formatting
 bun run lint    # lint only
+bun run test    # run tests
 ```
 
-Vite+ offers more (`vp dev`, `vp build`, `vp test`); those are documented here once the application scaffold uses them. Commands shown in this document work as written; do not assume undocumented ones exist.
+Vite+ offers more (`vp dev`, `vp build`); those are documented here once the application scaffold uses them. Commands shown in this document work as written; do not assume undocumented ones exist.
 
 ## Database
 
-PostgreSQL is the application database.
+PostgreSQL is the application database. The schema, the Drizzle client, and the migrations live in `packages/db`.
 
-Schema changes add a new migration; see `AGENTS.md` for the rules that govern migration history. Test migrations against realistic existing data when the change is non-trivial. Database setup and migration commands are documented here once implemented.
+Point `DATABASE_URL` at a database — copy `.env.example` to `.env` in the repository root and adjust it:
+
+```sh
+docker run -d --name qualityruntime-postgres \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=qualityruntime \
+  -p 5432:5432 postgres:18
+```
+
+`.env` is ignored, as are `.env.local` and `.env.*.local`. Mode-specific `.env.<mode>` files are **not** ignored; never put secrets in one.
+
+Change a table in `packages/db/schema/`, then generate and apply its migration:
+
+```sh
+bun run db:generate --name=add_controls   # writes packages/db/migrations/NNNN_add_controls.sql
+bun run db:migrate                        # applies pending migrations to DATABASE_URL
+```
+
+Both are also `bun run generate` / `bun run migrate` inside `packages/db`; the Drizzle config loads the root `.env` either way. `db:generate` needs no database; `db:migrate` fails if `DATABASE_URL` is unset.
+
+Always pass `--name`: it names the file and its `tag` in `migrations/meta/_journal.json` together. That file is drizzle-kit's, so never hand-edit it. Add the SPDX header to the generated `.sql`. Never edit a migration that may already have been applied; add a new one. See `AGENTS.md` for the rules that govern migration history, and test migrations against realistic existing data when the change is non-trivial.
+
+`packages/db/schema/migrations.test.ts` applies the migrations to PostgreSQL (via PGlite, so nothing needs to be running) and checks the constraints they create. `packages/db/schema/auth.test.ts` checks the Drizzle tables against what Better Auth says it writes.
+
+After upgrading `better-auth`, run `bun run test`, then compare `schema/auth.ts` with Drizzle reference output from the matching `auth` CLI version, generated from the same schema-affecting plugin configuration. Generating it needs a Better Auth config; the exact command belongs here once the application provides one. Those tests are structural only; [ADR 0001](adr/0001-drizzle-orm-and-better-auth.md) records what they do not cover.
 
 ## Before finishing
 
-Run `bun run check`, plus the REUSE lint.
+Run `bun run check` and `bun run test`, plus the REUSE lint. CI runs `check` and `test`; the REUSE lint has its own workflow.
 
 For REUSE validation on macOS:
 

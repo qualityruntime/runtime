@@ -5,8 +5,15 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1789690350523,
-      "tag": "0000_auth_and_tenancy",
+      "when": 1789758741423,
+      "tag": "0000_schema",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789758742287,
+      "tag": "0001_tenancy_and_finality",
       "breakpoints": true
     }
   ]

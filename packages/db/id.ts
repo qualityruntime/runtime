@@ -5,7 +5,7 @@
  * Prefixed identifiers: `usr_v1stgxr8z5jdhi6b`.
  *
  * The prefix identifies the record type, so an identifier is self-describing in
- * a log line or an export. `schema/auth.ts` enforces the format with a CHECK
+ * a log line or an export. `schema/columns.ts` enforces the format with a CHECK
  * per table, rejecting inserts with the wrong prefix, alphabet, or length.
  *
  * Reasoning: `docs/adr/0002-prefixed-identifiers.md`.
@@ -48,6 +48,13 @@ export const idFormats = {
   organization: { prefix: "org", length: 16 },
   member: { prefix: "mem", length: 16 },
   twoFactor: { prefix: "tfa", length: 16 },
+
+  control: { prefix: "ctl", length: 16 },
+  auditEvent: { prefix: "aud", length: 16 },
+  standard: { prefix: "std", length: 16 },
+  requirement: { prefix: "req", length: 16 },
+  evidence: { prefix: "evd", length: 16 },
+  file: { prefix: "fil", length: 16 },
 } as const;
 
 export type IdType = keyof typeof idFormats;
@@ -80,7 +87,8 @@ export function idPattern(type: IdType): string {
  * one, which the schema test catches before a deployment can.
  */
 export function generateId({ model }: { model: string }): string {
-  if (!(model in idFormats)) {
+  // `Object.hasOwn`, not `in`: `in` also admits inherited names like `toString`.
+  if (!Object.hasOwn(idFormats, model)) {
     throw new Error(`No identifier format is defined for the "${model}" table.`);
   }
   return createId(model as IdType);

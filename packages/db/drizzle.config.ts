@@ -12,8 +12,8 @@ const packageDir = relative(process.cwd(), fileURLToPath(new URL(".", import.met
 
 // The repository keeps one `.env` at its root; drizzle-kit only reads the
 // working directory's. Loading it here makes the commands behave the same from
-// the root and from this package. The file is optional when DATABASE_URL
-// is supplied by the environment.
+// the root and from this package. The file is optional when
+// MIGRATION_DATABASE_URL is supplied by the environment.
 try {
   process.loadEnvFile(fileURLToPath(new URL("../../.env", import.meta.url)));
 } catch (error) {
@@ -31,10 +31,20 @@ export default defineConfig({
   // added without one is spelled. Must match `createDatabase`.
   casing: "snake_case",
   dbCredentials: {
-    // Only read by commands that connect, so `generate` works without it.
+    /**
+     * Only read by commands that connect, so `generate` works without it.
+     *
+     * The migrator's, and never the server's `DATABASE_URL` as a fallback:
+     * migrations are applied by the role that owns the schema and runs with
+     * `row_security = off`, so a data migration that forgot its tenant fails
+     * rather than quietly matching nothing (ADR 0014). Keep this credential
+     * separate from the runtime role's.
+     */
     get url() {
-      const url = process.env.DATABASE_URL;
-      if (!url) throw new Error("DATABASE_URL is not set; it is required to reach the database.");
+      const url = process.env.MIGRATION_DATABASE_URL;
+      if (!url) {
+        throw new Error("MIGRATION_DATABASE_URL is not set; migrations connect as the migrator.");
+      }
       return url;
     },
   },

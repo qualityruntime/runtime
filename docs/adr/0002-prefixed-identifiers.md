@@ -35,7 +35,7 @@ Sixteen base36 characters is about 83 bits (36^16 ≈ 8 × 10^24) — past any c
 
 Sizing by table cardinality — wider for `session` and `verification`, narrower for `organization` — was considered and rejected. It is the wrong axis: `session.token` authenticates a session and `verification.value` proves a verification, so widening those `id` columns hardens nothing, and narrowing `organization` buys four characters in exchange for a third rule and a CHECK constraint that is painful to widen later.
 
-`packages/db/id.ts` owns the prefix and length of every table and is the single place where identifiers are generated. Two things consume it:
+`packages/db/id.ts` owns the prefix and length of every generated row-identifier type and is the single place where identifiers are generated. Two things consume it:
 
 - Each Drizzle `id` column defaults to `createId(type)`, so ordinary inserts need not think about it.
 - `generateId` is shaped for Better Auth's `advanced.database.generateId`, which is how the library is told to generate these instead of its own.
@@ -50,7 +50,7 @@ CONSTRAINT "user_id_format" CHECK ("id" ~ '^usr_[0-9a-z]{16}$')
 
 The format is enforced by the database, not by convention. A writer that has not been wired to `id.ts` — most importantly a Better Auth configuration that forgets `generateId` — fails on its first insert instead of quietly storing identifiers in a second format that later has to be migrated. `migrations.test.ts` applies the migrations to PostgreSQL and asserts exactly that rejection.
 
-Adding a table means choosing its prefix and its length. `auth.test.ts` fails when Better Auth writes a table that `idFormats` does not cover, and `generateId` throws rather than inventing a format.
+Adding a table with an `id` column means choosing its prefix and its length. `packages/db/schema/index.test.ts` fails when such a table has no format, and `generateId` throws rather than inventing one. A join table keyed by its foreign keys needs no identifier and is exempt.
 
 Changing a table's alphabet or length is a migration, because the CHECK constraints encode both. This is the intended cost: it makes the identifier format part of the schema rather than a convention that drifts. It also means a length should be chosen with room to be wrong in the safe direction — widening later is cheap, narrowing invalidates existing rows.
 

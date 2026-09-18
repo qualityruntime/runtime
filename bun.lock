@@ -10,6 +10,22 @@
         "vite-plus": "^0.3.2",
       },
     },
+    "apps/server": {
+      "name": "@qualityruntime/server",
+      "version": "0.0.0",
+      "dependencies": {
+        "@better-auth/drizzle-adapter": "1.7.5",
+        "@qualityruntime/db": "workspace:*",
+        "better-auth": "1.7.5",
+        "drizzle-orm": "^0.45.2",
+        "hono": "^4.10.7",
+        "pg": "^8.23.0",
+      },
+      "devDependencies": {
+        "@electric-sql/pglite": "^0.5.8",
+        "@types/pg": "^8.23.1",
+      },
+    },
     "packages/db": {
       "name": "@qualityruntime/db",
       "version": "0.0.0",
@@ -21,7 +37,6 @@
       "devDependencies": {
         "@electric-sql/pglite": "^0.5.8",
         "@types/pg": "^8.23.1",
-        "better-auth": "^1.7.5",
         "drizzle-kit": "^0.31.10",
       },
     },
@@ -218,6 +233,8 @@
     "@polka/url": ["@polka/url@1.0.0-next.29", "", {}, "sha512-wwQAWhWSuHaag8c4q/KN/vCoeOJYshAIvMQwD4GpSb3OiZklFfvAgmj0VCBBImRpuF/aFgIRzllXlVX93Jevww=="],
 
     "@qualityruntime/db": ["@qualityruntime/db@workspace:packages/db"],
+
+    "@qualityruntime/server": ["@qualityruntime/server@workspace:apps/server"],
 
     "@rolldown/binding-android-arm-eabi": ["@rolldown/binding-android-arm-eabi@1.2.9", "", { "os": "android", "cpu": "arm" }, "sha512-tNISae1QEf/vkb3xkRcjV5SEdzPE97We5IVaa2Z8jSszQPZ8U60B/YCYpw4QI7VidYsBtKavczXf+DyDs9WGxw=="],
 
@@ -440,6 +457,8 @@
     "fsevents": ["fsevents@2.3.3", "", { "os": "darwin" }, "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw=="],
 
     "get-tsconfig": ["get-tsconfig@4.14.3", "", { "dependencies": { "resolve-pkg-maps": "^1.0.0" } }, "sha512-++QEw4DIY7WGoukz+/+A/8dGYPT9l9yIadnmSgZ8Rjr3YVSVDipQSO9CdnJo9ePqFqUUqh+wk9uIaoiAwsiPkA=="],
+
+    "hono": ["hono@4.13.8", "", {}, "sha512-/Gng7NfoykZl2pjukW5Z6+8Yxm3BPRf86GTbQnt0SbySkvax4fyL4H3HhY1cCpBGmiW9XDRFzRV+CXK2W8QudQ=="],
 
     "jose": ["jose@6.2.12", "", {}, "sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw=="],
 

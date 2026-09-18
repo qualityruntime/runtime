@@ -38,6 +38,7 @@ Quality Runtime is being built primarily with:
 - TypeScript
 - Bun
 - PostgreSQL
+- Drizzle ORM
 - React
 - Vite+
 - Hono

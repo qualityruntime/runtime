@@ -18,7 +18,7 @@ Use **Drizzle ORM** for schema definition, queries, and migrations, and **Better
 
 Drizzle's schema is plain TypeScript that compiles to SQL we can read in review, and `drizzle-kit generate` produces checked-in, forward-only SQL migrations (MIGRATION-01). It stays close to SQL, so the PostgreSQL capabilities the architecture leans on remain reachable.
 
-Better Auth ships the tenancy model the product needs in its `organization` plugin, so organizations, memberships, and invitations are one source of truth rather than a parallel model beside the auth library's own. The schema supports these plugins; application authentication is not implemented yet:
+Better Auth ships the tenancy model the product needs in its `organization` plugin, so organizations, memberships, and invitations are one source of truth rather than a parallel model beside the auth library's own. The server enables these plugins:
 
 | Plugin         | Why                                                                   |
 | -------------- | --------------------------------------------------------------------- |
@@ -28,12 +28,9 @@ Better Auth ships the tenancy model the product needs in its `organization` plug
 
 Teams and dynamic access control are deliberately off. Both add tables, and neither has a requirement behind it yet.
 
-The Drizzle schema is written by hand rather than generated into the repository on every change. Two things keep it honest, and they cover different ground:
+The Drizzle schema is written by hand rather than generated into the repository on every change. Better Auth 1.7 runs the authoritative **structural** check when its adapter initializes, against the Drizzle schema object rather than the live database: every table and column it writes must exist, and no column it never fills may be required. `apps/server/auth.test.ts` initializes that adapter in CI, and additionally asserts every model is exported under the name the adapter looks up.
 
-- Better Auth 1.7 runs the authoritative **structural** check when its adapter initializes, against the Drizzle schema object rather than the live database: every table and column it writes must exist, and no column it never fills may be required. It does not compare types, uniqueness, indexes, or references, and it does not prove equivalence with the generated DDL.
-- `packages/db/schema/auth.test.ts` asserts the same structural properties from `getAuthTables`, plus an identifier format per model — before any application exists to initialize an adapter.
-
-Nothing automatically verifies column types, uniqueness, indexes, or references against Better Auth's definitions. When upgrading, compare a reference schema generated from the matching Better Auth configuration with the maintained schema. `migrations.test.ts` exercises selected database-level deviations and invariants against a real engine; it does not verify every deviation.
+Neither compares types, uniqueness, indexes, or references, and neither proves equivalence with the generated DDL. Nothing automatically verifies column types, uniqueness, indexes, or references against Better Auth's definitions. When upgrading, compare a reference schema generated from the matching Better Auth configuration with the maintained schema. `migrations.test.ts` exercises selected database-level deviations and invariants against a real engine; it does not verify every deviation.
 
 Migrations are generated with `drizzle-kit` and applied with it during development. Deployment applies the same checked-in migration history by a target-appropriate mechanism.
 
@@ -49,11 +46,6 @@ No Drizzle `relations()` are declared. They serve Better Auth's opt-in join mode
 
 `createDatabase` takes a `pg` `Client` or `Pool` rather than a connection string. Connection lifecycle differs enough between a long-lived server and a Worker behind Hyperdrive that choosing one here would put a deployment concern in the core (ARCH-01); the deployment owns it and injects the result.
 
-Domain tables join the same package and the same migration history. `packages/db` depends on `better-auth` only as a development dependency, for the schema test; the server configuration that calls `betterAuth()` will live with the application that serves it, and must both use the same schema-affecting plugin configuration the test declares — plugin options such as `teams` add tables — and pass `generateId` from [ADR 0002](0002-prefixed-identifiers.md):
+Domain tables join the same package and the same migration history. `packages/db` has no dependency on Better Auth, but it does hold the persistence schema Better Auth expects, in its naming and with its deviations documented. The configuration itself is `authOptions` in `apps/server/auth.ts`, the single source of truth for the server's static Better Auth configuration, which the compatibility test derives its expectations from. Options such as `teams` change the schema too, so it is the whole object that matters, not the plugin names alone.
 
-```ts
-betterAuth({
-  plugins: [organization(), admin(), twoFactor()],
-  advanced: { database: { generateId } },
-});
-```
+`better-auth` and its Drizzle adapter are pinned to exact versions. Compatibility with a hand-maintained schema is version-specific, so upgrading is a deliberate change — bump both together, run the tests, diff against freshly generated reference output, and migrate — not something a routine dependency refresh performs.

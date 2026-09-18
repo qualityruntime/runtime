@@ -20,7 +20,6 @@
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",
     "@types/pg": "^8.23.1",
-    "better-auth": "^1.7.5",
     "drizzle-kit": "^0.31.10"
   }
 }

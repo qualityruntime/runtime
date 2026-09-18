@@ -29,10 +29,8 @@
  * which is in use. Add them alongside whichever one arrives first.
  */
 
-import { sql } from "drizzle-orm";
 import {
   boolean,
-  check,
   index,
   integer,
   pgTable,
@@ -40,28 +38,7 @@ import {
   timestamp,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
-import { createId, type IdType, idPattern } from "../id.ts";
-
-/** A prefixed primary key, generated here when the writer does not supply one. */
-const id = (model: IdType) =>
-  text("id")
-    .primaryKey()
-    .$defaultFn(() => createId(model));
-
-/**
- * Rejects an identifier that does not carry this table's prefix and shape.
- * `sql.raw` because a CHECK is DDL and cannot take a bound parameter.
- */
-const idFormat = (table: string, model: IdType) =>
-  check(`${table}_id_format`, sql.raw(`"id" ~ '${idPattern(model)}'`));
-
-const createdAt = () => timestamp("created_at", { withTimezone: true }).defaultNow().notNull();
-
-const updatedAt = () =>
-  timestamp("updated_at", { withTimezone: true })
-    .defaultNow()
-    .$onUpdate(() => new Date())
-    .notNull();
+import { createdAt, id, idFormat, updatedAt } from "./columns.ts";
 
 /** Fields beyond the Better Auth core come from the `admin` and `twoFactor` plugins. */
 export const user = pgTable(
@@ -97,9 +74,9 @@ export const session = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     /**
-     * Which tenant the session is currently acting in — request context, not
-     * authorization. Access is decided by the caller's `member` row, never by
-     * this column alone.
+     * The organization last selected in this session. This is a preference,
+     * not proof of membership; access must be checked against `member`, and
+     * domain routes name their organization themselves rather than read it.
      */
     activeOrganizationId: text("active_organization_id").references(() => organization.id, {
       onDelete: "set null",

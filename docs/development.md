@@ -25,8 +25,6 @@ bun run lint    # lint only
 bun run test    # run tests
 ```
 
-Commands shown in this document work as written; do not assume undocumented ones exist.
-
 ## Editor
 
 `.vscode/` carries the shared setup; VS Code offers the recommended extensions on first open.
@@ -52,10 +50,10 @@ Change a table in `packages/db/schema/`, then generate and apply its migration:
 
 ```sh
 bun run db:generate --name=add_controls   # writes packages/db/migrations/NNNN_add_controls.sql
-bun run db:migrate                        # applies pending migrations to DATABASE_URL
+bun run db:migrate                        # applies pending migrations as MIGRATION_DATABASE_URL
 ```
 
-Both are also `bun run generate` / `bun run migrate` inside `packages/db`; the Drizzle config loads the root `.env` either way. `db:generate` needs no database; `db:migrate` fails if `DATABASE_URL` is unset.
+Both are also `bun run generate` / `bun run migrate` inside `packages/db`; the Drizzle config loads the root `.env` either way. `db:generate` needs no database; `db:migrate` connects as `MIGRATION_DATABASE_URL` and fails if it is unset, never falling back to `DATABASE_URL`.
 
 Always pass `--name`: it names the file and its `tag` in `migrations/meta/_journal.json` together. That file is drizzle-kit's, so never hand-edit it. Add the SPDX header to the generated `.sql`. Never edit a migration that may already have been applied; add a new one. See `AGENTS.md` for the rules that govern migration history, and test migrations against realistic existing data when the change is non-trivial.
 

@@ -21,7 +21,7 @@ These tables are owned by [Better Auth](https://better-auth.com) and defined in 
 
 ## Identifiers
 
-Every record's primary key uses `<prefix>_<random>`, for example `usr_v1stgxr8z5jdhi6b`. The prefix identifies the record type, and the random portion is a lowercase base36 value generated with [Nano ID](https://github.com/ai/nanoid). [ADR 0002](adr/0002-prefixed-identifiers.md) documents the decision. `packages/db/id.ts` is the single place where identifiers are generated.
+Every generated row identifier uses `<prefix>_<random>`, for example `usr_v1stgxr8z5jdhi6b`. The prefix identifies the record type, and the random portion is a lowercase base36 value generated with [Nano ID](https://github.com/ai/nanoid). [ADR 0002](adr/0002-prefixed-identifiers.md) documents the decision. `packages/db/id.ts` is the single place where identifiers are generated.
 
 | Table          | Prefix | Random length |
 | -------------- | ------ | ------------- |
@@ -34,7 +34,7 @@ Every record's primary key uses `<prefix>_<random>`, for example `usr_v1stgxr8z5
 | `member`       | `mem_` | 16            |
 | `two_factor`   | `tfa_` | 16            |
 
-A row identifier is not a credential: `session.token` authenticates a session and `verification.value` proves a verification. `invitation` is wider because Better Auth takes an invitation by id. Identifiers are allocated before insertion and reveal no row count. Each table enforces its own prefix, length, and alphabet with a CHECK constraint, so an identifier belonging to another table — or one carrying uppercase — is rejected rather than stored.
+A row identifier is not a credential: `session.token` authenticates a session and `verification.value` proves a verification. `invitation` is wider because Better Auth takes an invitation by id. Identifiers are allocated before insertion and reveal no row count. Each `id` column enforces its table's prefix, length, and alphabet with a CHECK constraint, so an identifier belonging to another table — or one carrying uppercase — is rejected rather than stored. Join tables need no separate identifier: `control_requirement` uses `(control_id, requirement_id)` as its primary key.
 
 ## Domain entities
 

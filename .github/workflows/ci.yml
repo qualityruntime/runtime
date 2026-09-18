@@ -14,6 +14,22 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      # The version `docs/development.md` tells a developer to run, and the one
+      # the concurrency suite has actually been exercised against.
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          # The suite wipes this database, and refuses a name not ending `_test`.
+          POSTGRES_DB: qualityruntime_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -21,9 +37,13 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - run: bun install --frozen-lockfile
       - run: bun run check
-      # PGlite runs PostgreSQL in-process, so the migration and schema tests
-      # need no service container.
+      # PGlite runs PostgreSQL in-process, so almost nothing here needs a
+      # service. The exception is the concurrency suite: PGlite is a single
+      # connection, so a lock cannot be exercised on it, and without this a
+      # change that breaks one would pass CI (ADR 0020).
       - run: bun run test
+        env:
+          TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/qualityruntime_test
 
   dco:
     # Trust is PR-level: the GitHub App is the only identity that can open a PR

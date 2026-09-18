@@ -3,8 +3,8 @@
 
 import { defineConfig } from "vite-plus";
 
-// Vite+ is the toolchain entry point: dev server, build, tests, lint, format.
-// Per-app and per-package configuration arrives with the application scaffold.
+// Vite+ runs format, lint, type check, and test across the workspace; the
+// server has its own Bun entry point.
 export default defineConfig({
   // `bun run check` is the documented gate, so it has to type-check too;
   // without this it only formats and lints.

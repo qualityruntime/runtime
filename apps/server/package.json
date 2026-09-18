@@ -1,0 +1,19 @@
+{
+  "name": "@qualityruntime/server",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "@better-auth/drizzle-adapter": "1.7.5",
+    "@qualityruntime/db": "workspace:*",
+    "better-auth": "1.7.5",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.10.7",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@types/pg": "^8.23.1"
+  }
+}

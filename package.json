@@ -12,6 +12,7 @@
     "fmt": "vp fmt",
     "lint": "vp lint",
     "test": "vp test",
+    "dev": "bun --watch apps/server/bun.ts",
     "db:generate": "bun run --cwd packages/db generate",
     "db:migrate": "bun run --cwd packages/db migrate"
   },

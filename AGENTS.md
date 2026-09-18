@@ -31,7 +31,7 @@ Read `ARCHITECTURE.md` before making structural changes.
 
 Deployment adapters may depend on core code; core code must not depend on deployment adapters or provider-specific concerns such as Cloudflare.
 
-Apps go in `apps/`, shared code in `packages/` — extract a package only when the boundary is real.
+Apps go in `apps/`, shared code in `packages/` — extract a package only when the boundary is real, and keep layouts shallow until more structure earns its keep.
 
 ## Changes
 

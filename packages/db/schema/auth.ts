@@ -6,9 +6,9 @@
  *
  * Better Auth addresses tables by the key they are exported under, so the
  * export names below are its model names and must not be renamed; the physical
- * table and column names are ours. `auth.test.ts` catches models and fields
- * this file is missing, but not column types or constraints; after upgrading
- * Better Auth, diff this against freshly generated reference output.
+ * table and column names are ours. `apps/server/auth.test.ts` catches models and
+ * fields this file is missing, but not column types or constraints; after
+ * upgrading Better Auth, diff this against freshly generated reference output.
  *
  * Deliberate deviations from the generated output:
  * - `timestamptz` throughout, so audit history is unambiguous across zones.

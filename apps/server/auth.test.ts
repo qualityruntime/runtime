@@ -28,18 +28,20 @@ import { type Auth, authOptions, createAuth } from "./auth.ts";
 
 const migrationsFolder = fileURLToPath(new URL("../../packages/db/migrations", import.meta.url));
 
-let db: ReturnType<typeof drizzle>;
+let db: ReturnType<typeof createTestDatabase>;
+
+const createTestDatabase = (client: PGlite) => drizzle({ client, schema, casing: "snake_case" });
 let auth: Auth;
 let app: ReturnType<typeof createApp>;
 
 beforeAll(async () => {
-  db = drizzle(new PGlite(), { schema });
+  db = createTestDatabase(new PGlite());
   await migrate(db, { migrationsFolder });
   auth = createAuth(db, {
     baseURL: "http://localhost",
     secret: "test-secret-of-at-least-32-characters",
   });
-  app = createApp(auth);
+  app = createApp({ auth, db });
 }, 60_000);
 
 /** Drops the response attributes so the value is a valid `Cookie` request header. */

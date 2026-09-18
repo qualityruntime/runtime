@@ -7,13 +7,16 @@
   "dependencies": {
     "@better-auth/drizzle-adapter": "1.7.5",
     "@qualityruntime/db": "workspace:*",
+    "@scalar/hono-api-reference": "^0.12.2",
     "better-auth": "1.7.5",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.10.7",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",
-    "@types/pg": "^8.23.1"
+    "@types/pg": "^8.23.1",
+    "ajv": "^8.20.0"
   }
 }

@@ -5,6 +5,7 @@ import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { generateId, schema } from "@qualityruntime/db";
 // `minimal` leaves out the bundled Kysely path, which the Drizzle adapter
 // replaces; it keeps the Workers bundle smaller.
+import { getCookies } from "better-auth/cookies";
 import { betterAuth } from "better-auth/minimal";
 import type { BetterAuthOptions } from "better-auth/types";
 import { admin, organization, twoFactor } from "better-auth/plugins";
@@ -26,7 +27,16 @@ export const authOptions = {
   // Authenticator apps show this as the TOTP issuer.
   appName: "Quality Runtime",
   emailAndPassword: { enabled: true },
-  plugins: [organization(), admin(), twoFactor()],
+  plugins: [
+    // Deleting an organization cascades through every tenant-owned table,
+    // and a foreign key's cascade answers to neither row-level security nor
+    // table privileges — it would take the audit log and every attestation
+    // with it. Removing a tenant is an operator's job, not a self-serve
+    // route an owner can reach (ADR 0005, ADR 0014).
+    organization({ disableOrganizationDeletion: true }),
+    admin(),
+    twoFactor(),
+  ],
   // Identifiers are prefixed and CHECK-enforced, so Better Auth must generate
   // them through `@qualityruntime/db` or every insert is rejected (ADR 0002).
   advanced: { database: { generateId } },
@@ -61,3 +71,12 @@ export function createAuth(db: AuthDatabase, { baseURL, secret }: AuthEnvironmen
 }
 
 export type Auth = ReturnType<typeof createAuth>;
+
+/**
+ * The cookie Better Auth authenticates a session with, for this instance.
+ *
+ * Asked of Better Auth rather than written down: it prefixes the name with
+ * `__Secure-` when the base URL is HTTPS, so a fixed string would be right in
+ * development and wrong in every deployment. `openapi.ts` publishes it.
+ */
+export const sessionCookieName = (auth: Auth): string => getCookies(auth.options).sessionToken.name;

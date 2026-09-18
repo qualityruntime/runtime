@@ -10,7 +10,7 @@
  * (ARCH-01).
  */
 
-import { createDatabase } from "@qualityruntime/db";
+import { assertTenantIsolation, createDatabase } from "@qualityruntime/db";
 import { Pool } from "pg";
 import { createApp } from "./app.ts";
 import { createAuth } from "./auth.ts";
@@ -26,9 +26,16 @@ function requireEnv(name: string): string {
 const pool = new Pool({ connectionString: requireEnv("DATABASE_URL") });
 const db = createDatabase(pool);
 
-export default createApp(
-  createAuth(db, {
+// A role that bypasses row-level security disables tenant isolation silently,
+// so refuse to start rather than serve without it (ADR 0003).
+await assertTenantIsolation(db);
+
+export default createApp({
+  db,
+  // Optional, unlike the rest: the reference falls back to the public CDN.
+  apiReferenceBundleUrl: process.env.API_REFERENCE_BUNDLE_URL,
+  auth: createAuth(db, {
     baseURL: requireEnv("BETTER_AUTH_URL"),
     secret: requireEnv("BETTER_AUTH_SECRET"),
   }),
-);
+});

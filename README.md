@@ -19,7 +19,7 @@ Quality Runtime aims to make standards, controls, procedures, evidence, audits, 
 The project is built around a few principles:
 
 - **Open source and self-hostable** — the core product should be genuinely useful without a hosted service.
-- **AI-native** — AI should be able to understand and act across the system through clear models, APIs, and tools.
+- **AI-native** — AI should be able to understand and act across the system through clear models, APIs, and tools. The API describes itself: `GET /api/v1/openapi.json`.
 - **Deterministic where it matters** — critical enforcement should remain explicit, testable, and auditable.
 - **Composable** — customization should happen through stable models, workflows, APIs, SDKs, and extensions rather than permanent forks.
 - **Understandable** — prefer simple architecture and boring primitives over unnecessary infrastructure and abstraction.
@@ -59,8 +59,10 @@ Development setup is documented in [docs/development.md](./docs/development.md).
 
 If you are exploring the codebase, also read:
 
+- [docs/product.md](./docs/product.md) — why the product exists, and what it deliberately is not
 - [AGENTS.md](./AGENTS.md) — repository rules for humans and coding agents
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — architecture and system invariants
+- [docs/adr/](./docs/adr/) — the decisions behind both, one file each
 
 ## Hosted service
 

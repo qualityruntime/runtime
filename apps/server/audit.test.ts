@@ -13,6 +13,9 @@
  * nothing — is `privileges.test.ts` and `documented-setup.test.ts`.
  */
 
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { schema, withOrganization } from "@qualityruntime/db";
@@ -22,8 +25,13 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { createApp } from "./app.ts";
 import { createAuth } from "./auth.ts";
+import { fileStoreOnDisk } from "./storage-on-disk.ts";
 
 const migrationsFolder = fileURLToPath(new URL("../../packages/db/migrations", import.meta.url));
+
+/** A store of its own, thrown away with the run. */
+const temporaryStore = async () =>
+  fileStoreOnDisk(await mkdtemp(join(tmpdir(), "qualityruntime-")));
 
 const createTestDatabase = (client: PGlite) => drizzle({ client, schema, casing: "snake_case" });
 
@@ -113,6 +121,7 @@ beforeAll(async () => {
   await migrate(db, { migrationsFolder });
   app = createApp({
     db,
+    store: await temporaryStore(),
     auth: createAuth(db, {
       baseURL: "http://localhost",
       secret: "test-secret-of-at-least-32-characters",
@@ -504,6 +513,26 @@ describe("reading an organization's history", () => {
 
     expect(data.map((event) => event.action).sort()).toEqual(["created", "deleted"]);
     expect(data.every((event) => event.resourceId === control.id)).toBe(true);
+  });
+
+  it("spans every kind of record, not just controls", async () => {
+    const control = await given(acme, { name: "With evidence" });
+    const recorded = await app.request(
+      `/api/v1/organizations/${acme.organizationId}/controls/${control.id}/evidence`,
+      {
+        method: "POST",
+        headers: { cookie: acme.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ title: "Minutes", occurredAt: "2026-07-01T09:00:00.000Z" }),
+      },
+    );
+    expect(recorded.status).toBe(201);
+    const evidenceId = (await json<{ data: { id: string } }>(recorded)).data.id;
+
+    const { data } = await readHistory(acme);
+
+    expect(data.some((event) => event.resourceId === control.id)).toBe(true);
+    const theirs = data.find((event) => event.resourceId === evidenceId);
+    expect(theirs?.resourceType).toBe("evidence");
   });
 
   it("narrows to one record by the identifier alone", async () => {

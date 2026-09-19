@@ -32,7 +32,9 @@
  * tables is not executed — on this one it would do nothing.
  */
 
-import { readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { assertTenantIsolation, schema } from "@qualityruntime/db";
@@ -41,6 +43,7 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { describe, expect, it } from "vite-plus/test";
 import { createApp } from "./app.ts";
 import { createAuth } from "./auth.ts";
+import { fileStoreOnDisk } from "./storage-on-disk.ts";
 
 const repository = new URL("../../", import.meta.url);
 const migrationsFolder = fileURLToPath(new URL("packages/db/migrations", repository));
@@ -203,6 +206,7 @@ describe.each(documents)("the setup in $path", ({ path, heading }) => {
 
     const app = createApp({
       db,
+      store: fileStoreOnDisk(await mkdtemp(join(tmpdir(), "qualityruntime-"))),
       auth: createAuth(db, {
         baseURL: "http://localhost",
         secret: "test-secret-of-at-least-32-characters",
@@ -238,20 +242,23 @@ describe.each(documents)("the setup in $path", ({ path, heading }) => {
     const request = (suffix: string, init: Request = {}) =>
       app.request(`${base}${suffix}`, { ...init, headers: { cookie, ...init.headers } });
 
-    // The loop so far, on privileges the document alone produced.
+    // The whole loop, on privileges the document alone produced.
     const control = await request("/controls", asJson({ name: "Access review" }));
     expect(control.status).toBe(201);
     const controlId = (await json<{ data: { id: string } }>(control)).data.id;
 
-    const activated = await request(`/controls/${controlId}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ status: "active" }),
-    });
-    expect(activated.status).toBe(200);
+    const evidence = await request(
+      `/controls/${controlId}/evidence`,
+      asJson({ title: "Q3 review", occurredAt: "2026-07-01T09:00:00.000Z" }),
+    );
+    expect(evidence.status).toBe(201);
+    const evidenceId = (await json<{ data: { id: string } }>(evidence)).data.id;
 
-    const history = await request(`/history?resource=${controlId}`);
-    expect(history.status).toBe(200);
+    const uploaded = await request(`/evidence/${evidenceId}/files?filename=notes.txt`, {
+      method: "POST",
+      body: "the minutes",
+    });
+    expect(uploaded.status).toBe(201);
 
     const standard = await request(
       "/standards",
@@ -262,16 +269,6 @@ describe.each(documents)("the setup in $path", ({ path, heading }) => {
       }),
     );
     expect(standard.status).toBe(201);
-    const standardId = (await json<{ data: { id: string } }>(standard)).data.id;
-    const requirements = await request(`/standards/${standardId}/requirements`);
-    const requirementId = (await json<{ data: { id: string }[] }>(requirements)).data[0]!.id;
-
-    const mapped = await request(`/controls/${controlId}/requirements`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ requirementIds: [requirementId] }),
-    });
-    expect(mapped.status).toBe(200);
 
     // The refusals the revoke block exists for.
     const refused = async (statement: string) => {

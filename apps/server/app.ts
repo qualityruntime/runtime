@@ -12,7 +12,10 @@ import { controls } from "./controls.ts";
 import { failure } from "./responses.ts";
 import { openApiDocument, openApiPath, referencePath } from "./openapi.ts";
 import { organizationContext } from "./organization.ts";
+import type { FileStore } from "./storage.ts";
+import { evidence } from "./evidence.ts";
 import { history } from "./history.ts";
+import { files } from "./files.ts";
 import { requirements } from "./requirements.ts";
 import { standards } from "./standards.ts";
 
@@ -36,10 +39,13 @@ import { standards } from "./standards.ts";
 export function createApp<Q extends PgQueryResultHKT>({
   auth,
   db,
+  store,
   apiReferenceBundleUrl,
 }: {
   auth: Auth;
   db: RootDatabase<Q>;
+  /** Durable storage for file bytes, supplied by the deployment (ADR 0013). */
+  store: FileStore;
   /**
    * Where the rendered reference loads its bundle from, when not the CDN.
    *
@@ -69,6 +75,14 @@ export function createApp<Q extends PgQueryResultHKT>({
   const standardImport = bodyLimit({ maxSize: 1024 * 1024, onError: tooLarge });
   const importsAStandard = (c: Context) =>
     c.req.method === "POST" && /^\/api\/v1\/organizations\/[^/]+\/standards$/.test(c.req.path);
+  /**
+   * A file is streamed to storage as it arrives and counted there, so it must
+   * not meet a limiter that buffers it first to find out how big it is
+   * (ADR 0013).
+   */
+  const uploadsAFile = (c: Context) =>
+    c.req.method === "POST" &&
+    /^\/api\/v1\/organizations\/[^/]+\/evidence\/[^/]+\/files$/.test(c.req.path);
 
   return (
     new Hono()
@@ -102,11 +116,16 @@ export function createApp<Q extends PgQueryResultHKT>({
           ...(apiReferenceBundleUrl ? { cdn: apiReferenceBundleUrl } : {}),
         }),
       )
-      .use("/api/v1/*", (c, next) => (importsAStandard(c) ? standardImport : ordinary)(c, next))
+      .use("/api/v1/*", (c, next) => {
+        if (uploadsAFile(c)) return next();
+        return (importsAStandard(c) ? standardImport : ordinary)(c, next);
+      })
       .use(`${tenant}/*`, organizationContext({ auth, db }))
       .route(tenant, controls)
       .route(tenant, history)
       .route(tenant, standards)
       .route(tenant, requirements)
+      .route(tenant, evidence)
+      .route(tenant, files(store))
   );
 }

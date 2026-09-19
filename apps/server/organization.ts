@@ -23,11 +23,15 @@ import { type Actor, type RecordChange, recordChange } from "./audit.ts";
 import type { Auth } from "./auth.ts";
 import { failure } from "./responses.ts";
 
+type Session = NonNullable<Awaited<ReturnType<Auth["api"]["getSession"]>>>;
+
 const isOrganizationId = new RegExp(idPattern("organization"));
 
 /** What every handler behind this middleware can rely on. */
 export type OrganizationEnv = {
   Variables: {
+    /** The authenticated caller. */
+    user: Session["user"];
     /** Their membership of this organization — the authorization decision, kept. */
     member: typeof schema.member.$inferSelect;
     /**
@@ -43,6 +47,13 @@ export type OrganizationEnv = {
      * for the same reason: a handler says what happened, never who did it.
      */
     audit: RecordChange;
+    /**
+     * Who the request is attributable to, resolved once. Handlers that record
+     * attribution of their own — an attestation, say — take it from here
+     * rather than from `user`, which under impersonation is the member being
+     * acted as rather than the administrator acting.
+     */
+    actor: Actor;
   };
 };
 
@@ -114,6 +125,7 @@ export function organizationContext<Q extends PgQueryResultHKT>({
       return c.json(failure("not_found", "No such organization."), 404);
     }
 
+    c.set("user", session.user);
     c.set("member", membership);
     // Better Auth's admin plugin can impersonate: `session.user` is then the
     // member being acted as, and `impersonatedBy` the administrator doing it.
@@ -138,6 +150,7 @@ export function organizationContext<Q extends PgQueryResultHKT>({
         }
       : { type: "user", id: session.user.id, label: session.user.name || null };
 
+    c.set("actor", actor);
     c.set("audit", (tx, change) => recordChange(tx, actor, organizationId, change));
     // The driver is erased here so handlers need not be generic over it; every
     // transaction method a handler uses is identical across drivers.

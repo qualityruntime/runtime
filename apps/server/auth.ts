@@ -32,7 +32,7 @@ export const authOptions = {
     // and a foreign key's cascade answers to neither row-level security nor
     // table privileges — it would take the audit log and every attestation
     // with it. Removing a tenant is an operator's job, not a self-serve
-    // route an owner can reach (ADR 0005, ADR 0014).
+    // route an owner can reach (ADR 0005, ADR 0012, ADR 0014).
     organization({ disableOrganizationDeletion: true }),
     admin(),
     twoFactor(),

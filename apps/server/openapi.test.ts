@@ -10,6 +10,9 @@
  * parses against the schema the document publishes.
  */
 
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { schema } from "@qualityruntime/db";
@@ -19,6 +22,7 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { createApp } from "./app.ts";
 import { createAuth } from "./auth.ts";
+import { fileStoreOnDisk } from "./storage-on-disk.ts";
 import { sessionCookieName } from "./auth.ts";
 import { openApiDocument, openApiPath, referencePath } from "./openapi.ts";
 
@@ -60,6 +64,10 @@ async function conformsToDocument(
 
 const migrationsFolder = fileURLToPath(new URL("../../packages/db/migrations", import.meta.url));
 
+/** A store of its own, thrown away with the run. */
+const temporaryStore = async () =>
+  fileStoreOnDisk(await mkdtemp(join(tmpdir(), "qualityruntime-")));
+
 const createTestDatabase = (client: PGlite) => drizzle({ client, schema, casing: "snake_case" });
 
 let app: ReturnType<typeof createApp>;
@@ -100,6 +108,7 @@ beforeAll(async () => {
   });
   app = createApp({
     db,
+    store: await temporaryStore(),
     auth,
   });
 
@@ -266,8 +275,30 @@ describe("the requests it promises to accept", () => {
   });
 
   it.each([
+    ["a header injection", "text/plain\r\nX-Injected: 1"],
+    ["something that is not a media type", "not a media type"],
+    ["a type with no subtype", "application"],
+  ])("publishes a query schema that refuses %s as a content type", (_case, contentType) => {
+    // The server refuses these, and the database refuses them after that. A
+    // constraint that survives into the server but not into the document is
+    // the failure ADR 0007 exists to prevent — and this one is a `regex`
+    // precisely because a `refine` converts to nothing at all.
+    const upload = "/api/v1/organizations/{organizationId}/evidence/{evidenceId}/files";
+    const post = openApiDocument(sessionCookieName(auth)).paths[upload]!.post as {
+      parameters: { name: string; schema: object }[];
+    };
+    const published = post.parameters.find((parameter) => parameter.name === "contentType");
+
+    const validate = ajv.compile(published!.schema);
+    expect(validate(contentType)).toBe(false);
+    expect(validate("application/pdf")).toBe(true);
+  });
+
+  it.each([
     ["get", "/api/v1/organizations/{organizationId}/controls/{controlId}"],
     ["patch", "/api/v1/organizations/{organizationId}/controls/{controlId}"],
+    ["get", "/api/v1/organizations/{organizationId}/evidence/{evidenceId}"],
+    ["patch", "/api/v1/organizations/{organizationId}/evidence/{evidenceId}"],
     ["get", "/api/v1/organizations/{organizationId}/controls/{controlId}/requirements"],
     ["put", "/api/v1/organizations/{organizationId}/controls/{controlId}/requirements"],
   ])("says that %s %s answers with an ETag", (method, path) => {

@@ -198,6 +198,12 @@ Additional services must not become mandatory without strong operational justifi
 
 Cloud-provider-specific implementations live in deployment adapters, and the application must remain portable to other environments.
 
+Hostnames are configuration. The runtime assumes no hosted service's domains; custom domains and their certificates belong to the deployment in front of it.
+
+Public pages, when they exist, are server-rendered routes in `apps/server` answered only on a separate public origin the deployment configures, so nothing served there can use a session: they need no sign-in, set no session cookies, and render structured records, never tenant-supplied HTML or scripts. Printed addresses use immutable identifiers, so they survive a record's rename.
+
+Anything that needs a sign-in, including an outside reviewer's read access, stays on the application's origin; a public page may link to it.
+
 ## Hosted product boundary
 
 The public runtime contains functionality generally useful to anyone operating Quality Runtime themselves. Hosted-service concerns (billing, subscriptions, provisioning, usage metering, entitlements, internal cloud operations) stay outside it.

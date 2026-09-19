@@ -41,7 +41,7 @@ Apps go in `apps/`, shared code in `packages/` — extract a package only when t
 - Add or update tests for important behavior.
 - Never weaken tenant isolation, authorization, auditability, or data integrity for convenience.
 - Never modify an existing applied database migration; add a new one.
-- Sign off commits with `git commit -s` (Developer Certificate of Origin); pull requests opened by `qualityruntime[bot]` are exempt.
+- Sign off commits with `git commit -s` (Developer Certificate of Origin); pull requests opened by `quality-runtime[bot]` are exempt.
 
 ## Licensing
 

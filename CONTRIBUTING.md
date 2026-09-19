@@ -51,7 +51,7 @@ Signed-off-by: Jane Doe <jane@example.com>
 
 The sign-off certifies your contribution under the [Developer Certificate of Origin 1.1](https://developercertificate.org/). CI rejects pull requests whose commits are not signed off.
 
-Pull requests opened by Quality Runtime's trusted project automation, `qualityruntime[bot]`, are exempt: a bot cannot make the DCO's first-person certification. The exemption covers automation acting for the project, not an external contribution rewritten by it — when automation submits someone else's work, that person's sign-off stays in the contribution.
+Pull requests opened by Quality Runtime's trusted project automation, `quality-runtime[bot]`, are exempt: a bot cannot make the DCO's first-person certification. The exemption covers automation acting for the project, not an external contribution rewritten by it — when automation submits someone else's work, that person's sign-off stays in the contribution.
 
 AI-assisted contributions are welcome. The sign-off certifies the contribution under DCO 1.1 whether or not a coding agent assisted: review what you submit, make sure you can make that certification, and make sure you have the right to submit the work under Apache-2.0. It does not mean you typed every line. Do not submit code copied from third-party sources unless its license permits inclusion and you preserve the required attribution and notices.
 

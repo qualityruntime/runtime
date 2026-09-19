@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from "vite-plus/test";
-import { ifMatch } from "./preconditions.ts";
+import { ifMatch, setVersion } from "./preconditions.ts";
 
 describe("reading If-Match", () => {
   const tag = '"424242"';
@@ -89,5 +89,36 @@ describe("reading If-Match", () => {
     // a tag. Refusing is the safe reading; `absent` would write regardless.
     expect(ifMatch("", tag)).toBe("failed");
     expect(ifMatch("  ", tag)).toBe("failed");
+  });
+});
+
+describe("versioning a set", () => {
+  // Its callers happen to sort before handing it anything, so nothing about
+  // these guarantees is observable through a route. They are the function's
+  // own, and this is where they can be held to.
+  it("is the same for the same members, in any order", () => {
+    expect(setVersion(["b", "a", "c"])).toBe(setVersion(["a", "b", "c"]));
+  });
+
+  it("is different for different members", () => {
+    expect(setVersion(["a", "b"])).not.toBe(setVersion(["a", "c"]));
+    expect(setVersion(["a", "b"])).not.toBe(setVersion(["a"]));
+  });
+
+  it("gives the empty set a version of its own", () => {
+    // "Mapped to nothing" is a state a caller can hold and write against, not
+    // the absence of one.
+    expect(setVersion([])).toMatch(/^[0-9a-f]{64}$/);
+    expect(setVersion([])).not.toBe(setVersion([""]));
+  });
+
+  it("counts a repeated member once, as a set does", () => {
+    expect(setVersion(["a", "a"])).toBe(setVersion(["a"]));
+  });
+
+  it("does not confuse one member with two", () => {
+    // The serialisation must be unambiguous: a member containing a comma is
+    // still one member.
+    expect(setVersion(["a,b"])).not.toBe(setVersion(["a", "b"]));
   });
 });

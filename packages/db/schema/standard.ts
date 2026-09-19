@@ -102,10 +102,9 @@ export const requirement = pgTable(
      * — `7.10` precedes `7.9` lexically — and rendering a standard out of order
      * is rendering a different document.
      *
-     * Not unique within a standard, deliberately: inserting a clause between
-     * two others, or swapping a pair, would otherwise need every row after it
-     * renumbered in the same statement. Ties are therefore possible, so the
-     * order is `(position, id)` and never `position` alone.
+     * Not unique within a standard: a clause can use an occupied position
+     * without renumbering later clauses. Ties are broken by identifier, so
+     * every read orders by `(position, id)`.
      */
     position: integer("position").notNull(),
     createdAt: createdAt(),

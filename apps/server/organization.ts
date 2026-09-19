@@ -34,7 +34,10 @@ export type OrganizationEnv = {
      * Runs tenant-owned work scoped to this request's organization. Bound, so a
      * handler cannot scope to an organization the caller was not authorized for.
      */
-    withOrganization: <T>(work: (tx: TenantTransaction) => Promise<T>) => Promise<T>;
+    withOrganization: <T>(
+      work: (tx: TenantTransaction) => Promise<T>,
+      options?: { repeatableRead?: boolean },
+    ) => Promise<T>;
     /**
      * Records a change on the transaction that makes it. Bound to the caller
      * for the same reason: a handler says what happened, never who did it.
@@ -138,11 +141,12 @@ export function organizationContext<Q extends PgQueryResultHKT>({
     c.set("audit", (tx, change) => recordChange(tx, actor, organizationId, change));
     // The driver is erased here so handlers need not be generic over it; every
     // transaction method a handler uses is identical across drivers.
-    c.set("withOrganization", ((work) =>
+    c.set("withOrganization", ((work, options) =>
       withOrganization(
         db,
         organizationId,
         work,
+        options,
       )) as OrganizationEnv["Variables"]["withOrganization"]);
 
     await next();

@@ -27,17 +27,17 @@ The machinery to prevent that already existed — a row version, an entity tag, 
 
 **The version is `xmin`.** It identifies the transaction that wrote the row version. Separate transactions receive different values until transaction IDs wrap; repeated updates within one transaction share a value. `updated_at` would not do: it is set from JavaScript, so it carries milliseconds, and two writes inside one millisecond would share a value — a stale tag that still matched. `xmin` is not durable across a dump and restore, which makes outstanding tags stale; that is the safe direction, since a write is refused and the caller reads again. Freezing does _not_ do that, despite the folklore: PostgreSQL marks a frozen tuple with a flag and leaves the `xmin` it reports alone, which a probe confirms across a `VACUUM FREEZE`.
 
-**The comparison happens after the row is locked.** Every conditional route takes `SELECT … FOR UPDATE` before comparing, so nothing can move between the test and the write and the version does not need repeating in the `WHERE`.
+**For amendments and deletions, the comparison happens after the row is locked.** These handlers take `SELECT … FOR UPDATE` before comparing, so nothing can move between the test and the write and the version does not need repeating in the `WHERE`. Attestation instead constrains its `UPDATE` by the version, as described below.
 
-The first draft of this got the evidence discard wrong: it compared against an unlocked read and then deleted, which leaves the row free to be amended in between — a review reproduced exactly that with two sessions, and the delete removed evidence the caller had not seen. A conditional write that compares something it does not hold is not a conditional write.
+Comparing against an unlocked read and then deleting allows a concurrent amendment between the two statements, deleting evidence the caller had not seen. The lock must span the comparison and deletion.
 
-Evidence reads unlocked _first_, then locks, because `SELECT … FOR UPDATE` is governed by the `UPDATE` policy: an attested row is not there to lock, and "cannot be locked" would come back as "does not exist" rather than "cannot be changed". The unlocked read is what tells 404 from 409; the lock is what decides. Attestation repeats the version in its `WHERE` instead, because it never locks at all, for the same reason.
+Evidence reads unlocked _first_, then locks, because `SELECT … FOR UPDATE` is governed by the `UPDATE` policy: an attested row is not there to lock, and "cannot be locked" would come back as "does not exist" rather than "cannot be changed". The unlocked read is what tells 404 from 409; the lock is what decides. Attestation repeats the version in its `UPDATE` predicate instead of taking an explicit lock before the comparison.
 
 **`*` means only if it still exists**, and only as the whole field — never one item of a list, which RFC 9110 does not allow and which would otherwise turn a list into an unconditional write.
 
 **Attesting does not use this parser at all**, and that is deliberate. It compares the header to the tag exactly, so `*` and a list are both refused even when the list holds the right tag. Everywhere else `If-Match` asks "has this moved?", and a wildcard meaning "only if it still exists" is a reasonable thing to ask. A signature is of something in particular, and "whatever version is there" is not a thing to sign.
 
-The field is parsed rather than split. An entity tag is opaque and quoted, so a comma or an asterisk between the quotes is part of it: `"old,*,other"` is one tag that matches nothing, and splitting on commas exposes an `*` that was never a wildcard. That was the first draft's other mistake, and it let any write through. Comparison is strong — a weak tag never matches, and nothing here issues one — and anything that is not a well-formed field fails, including a header that is present and empty. A client that sent the header meant something by it, and writing anyway is the wrong way to be wrong.
+The field is parsed rather than split. An entity tag is opaque and quoted, so a comma or an asterisk between the quotes is part of it: `"old,*,other"` is one tag that matches nothing, and splitting on commas exposes an `*` that was never a wildcard. Comparison is strong — a weak tag never matches, and nothing here issues one — and anything that is not a well-formed field fails, including a header that is present and empty. A client that sent the header meant something by it, and writing anyway is the wrong way to be wrong.
 
 **A tag covers the whole representation, not just its row.** Evidence reads back with its files, so attaching one changes the record — and `file` is a separate table, whose insert does not move `evidence`'s version. Without something to say otherwise, a caller could discard evidence carrying an attachment it never saw, and the file would cascade away with it. Attaching therefore touches the evidence row, which the audit event already called an update to the evidence; now the row agrees.
 
@@ -47,7 +47,7 @@ The field is parsed rather than split. An entity tag is opaque and quoted, so a 
 
 ## Consequences
 
-`PUT /controls/{controlId}/requirements` is conditional too, by the route this paragraph originally ruled out. It replaces a set of mapping rows rather than amending one record, so there is no `xmin` to quote — the **contents are the version**: the sorted, length-prefixed member identifiers, hashed. Members are length-prefixed so that no member can impersonate two, and an empty set has a version of its own rather than colliding with a set holding an empty member; neither is reachable with the identifiers used today, and a version that collides is worse than no version.
+`PUT /controls/{controlId}/requirements` was initially excluded because it replaces a set of mapping rows rather than amending one record, so there is no single `xmin` to quote. It now supports conditional writes using the **contents as the version**: SHA-256 of the sorted, deduplicated member identifiers encoded as a JSON array. JSON keeps member boundaries unambiguous and distinguishes an empty set from a set containing an empty string.
 
 That tag says nothing about _when_. Two equal sets are indistinguishable, which is exactly what a caller asking "is it still what I read?" means.
 
@@ -55,7 +55,7 @@ That tag says nothing about _when_. Two equal sets are indistinguishable, which 
 
 **The listing reads its page and its version from one snapshot.** Under `read committed` those are two statements and can see two different committed sets, which would hand a client a version for membership it was never shown. `withOrganization` takes a `repeatableRead` option for reads whose answers have to agree with each other. Reading one piece of evidence and listing a control's evidence use it too, for the same reason: a row and its separately queried attachments are two statements, and the tag an attestation quotes has to describe the files shown beside it. No write uses it — a write deciding from what is stored _now_ wants the opposite.
 
-The version is selected alongside the columns, so one query serves both the body and the tag, and `withoutVersion` strips it before the response. A strict response schema would refuse it in the body ([ADR 0007](0007-openapi-from-the-schemas.md)), which is the backstop if that ever slips.
+For row tags, the version is selected alongside the columns, so one query serves both the body and the tag; `withoutVersion` strips it before the response. Tests check representative responses against the strict published schemas ([ADR 0007](0007-openapi-from-the-schemas.md)); handlers do not validate outgoing responses at runtime.
 
 Nothing obliges a client to use this, so nothing guarantees a careless one is safe. That is the cost of optional, taken knowingly: the product now offers the guarantee rather than enforcing it, and a client that wants to be careful can be.
 

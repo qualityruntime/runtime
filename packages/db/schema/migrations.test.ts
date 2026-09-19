@@ -315,9 +315,9 @@ describe("standards and requirements", () => {
   });
 
   it("allows two requirements to share a position", async () => {
-    // Uniqueness here would mean renumbering every later clause to insert one,
-    // and a swap would need a spare value to pass through. The cost is that
-    // `position` alone is not an order, which is why the index carries the id.
+    // Ties let a clause use an occupied position without renumbering later
+    // clauses. The cost is that `position` alone is not an order, which is why
+    // the index carries the id.
     const [org] = await db.insert(organization).values(newOrganization()).returning();
     const parent = await newStandard(org!.id);
 

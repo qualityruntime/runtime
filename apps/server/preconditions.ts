@@ -10,6 +10,7 @@
  * ask gets the write regardless.
  */
 
+import { createHash } from "node:crypto";
 import { type SQL, sql } from "drizzle-orm";
 import type { PgTable } from "drizzle-orm/pg-core";
 
@@ -28,6 +29,22 @@ export const rowVersion = (table: PgTable): SQL<string> => sql<string>`${table}.
 
 /** The entity tag for a row read with `rowVersion`. */
 export const entityTag = (row: { version: string }) => `"${row.version}"`;
+
+/**
+ * A version for a *set* of rows, which has no `xmin` of its own.
+ *
+ * Replacing a control's requirements replaces mapping rows, so no single row
+ * version describes the set. Hash the member identifiers instead (ADR 0019):
+ * the same members give the same tag regardless of their input order.
+ *
+ * It says nothing about *when* — two sets that are equal are indistinguishable,
+ * which is what a caller asking "is it still what I read?" actually means.
+ */
+export const setVersion = (members: readonly string[]): string =>
+  // JSON rather than a join, so no member can pass for two.
+  createHash("sha256")
+    .update(JSON.stringify([...new Set(members)].sort()))
+    .digest("hex");
 
 /** What `If-Match` said about the row as it now stands. */
 export type Precondition = "absent" | "met" | "failed";
@@ -95,7 +112,8 @@ export function ifMatch(header: string | undefined, tag: string): Precondition {
  * The row as a client sees it: everything but the version.
  *
  * The version is read alongside the columns so that one query serves both the
- * body and the tag, and a strict response schema would refuse it in the body.
+ * body and the tag. Response-schema tests reject the extra field; handlers
+ * do not validate outgoing responses at runtime.
  */
 export const withoutVersion = <T extends { version: string }>(row: T): Omit<T, "version"> => {
   const { version, ...rest } = row;

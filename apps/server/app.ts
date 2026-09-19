@@ -13,6 +13,8 @@ import { failure } from "./responses.ts";
 import { openApiDocument, openApiPath, referencePath } from "./openapi.ts";
 import { organizationContext } from "./organization.ts";
 import { history } from "./history.ts";
+import { requirements } from "./requirements.ts";
+import { standards } from "./standards.ts";
 
 /**
  * The HTTP surface.
@@ -42,24 +44,31 @@ export function createApp<Q extends PgQueryResultHKT>({
    * Where the rendered reference loads its bundle from, when not the CDN.
    *
    * Passed in rather than read from `process.env` here: this is core, and core
-   * must not know how a deployment keeps its configuration (ARCH-01). A Workers
-   * entry has no `process.env` at all — its environment arrives per request.
+   * must not know how a deployment keeps its configuration (ARCH-01).
    */
   apiReferenceBundleUrl?: string;
 }) {
   const tenant = "/api/v1/organizations/:organizationId";
 
   /**
-   * How much of a body a route may read, decided before any of it is read.
+   * How much of a body each route may read, decided before any of it is read.
    *
    * A body is read and parsed in full before a validator sees it, so the field
-   * bounds in a route schema do not bound the work a request costs. Chosen
-   * here rather than on the route: a limiter with no `Content-Length` to go on
-   * buffers the stream before passing it down, so a route that needs a
-   * different allowance has to be told apart here, ahead of this one.
+   * bounds in a route schema do not bound the work a request costs. One figure
+   * cannot serve every route: 64 KiB refuses a legitimate standard, and a
+   * standard's allowance would let every other route accept one.
+   *
+   * It has to be chosen here rather than on the route. A limiter with no
+   * `Content-Length` to go on buffers the stream before passing it down, so a
+   * generous limit in front of a strict one is simply the generous one.
    */
   const tooLarge = (c: Context) =>
     c.json(failure("payload_too_large", "The request body is too large."), 413);
+  const ordinary = bodyLimit({ maxSize: 64 * 1024, onError: tooLarge });
+  // A standard arrives whole, with the text of every clause it states (ADR 0009).
+  const standardImport = bodyLimit({ maxSize: 1024 * 1024, onError: tooLarge });
+  const importsAStandard = (c: Context) =>
+    c.req.method === "POST" && /^\/api\/v1\/organizations\/[^/]+\/standards$/.test(c.req.path);
 
   return (
     new Hono()
@@ -93,9 +102,11 @@ export function createApp<Q extends PgQueryResultHKT>({
           ...(apiReferenceBundleUrl ? { cdn: apiReferenceBundleUrl } : {}),
         }),
       )
-      .use("/api/v1/*", bodyLimit({ maxSize: 64 * 1024, onError: tooLarge }))
+      .use("/api/v1/*", (c, next) => (importsAStandard(c) ? standardImport : ordinary)(c, next))
       .use(`${tenant}/*`, organizationContext({ auth, db }))
       .route(tenant, controls)
       .route(tenant, history)
+      .route(tenant, standards)
+      .route(tenant, requirements)
   );
 }

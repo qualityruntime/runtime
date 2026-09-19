@@ -19,7 +19,8 @@
  */
 
 import { fileURLToPath } from "node:url";
-import { createDatabase, schema } from "@qualityruntime/db";
+import { createDatabase, schema, withOrganization } from "@qualityruntime/db";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool, type PoolClient } from "pg";
@@ -166,6 +167,36 @@ const control = async (name: string) => {
   });
   expect(response.status).toBe(201);
   return (await json<{ data: { id: string } }>(response)).data.id;
+};
+
+/**
+ * Two of acme's requirements, importing a standard the first time. Each test
+ * asks for its own rather than relying on one that ran before it, so a test
+ * picked out with `-t` still has what it needs.
+ */
+const requirements = async (): Promise<[string, string]> => {
+  const held = () =>
+    admin.query<{ id: string }>(
+      `select "id" from "requirement" where "organization_id" = $1 order by "id" limit 2`,
+      [acme.organizationId],
+    );
+  let { rows } = await held();
+  if (rows.length < 2) {
+    const imported = await request("/standards", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "ISO 9001",
+        edition: "2015",
+        requirements: [
+          { reference: "7.5.1", title: "General" },
+          { reference: "7.5.3", title: "Documented information" },
+        ],
+      }),
+    });
+    expect(imported.status).toBe(201);
+    ({ rows } = await held());
+  }
+  return [rows[0]!.id, rows[1]!.id];
 };
 
 beforeAll(async () => {
@@ -350,6 +381,125 @@ describe.skipIf(!usable)("what a lock actually prevents", () => {
     // One replaced the original; the other replaced whatever the first wrote.
     expect(replaced).toContain("Original");
     expect(new Set(replaced).size).toBe(2);
+  });
+
+  it("refuses a conditional remapping of a control remapped while it waited", async () => {
+    // The last mutation that was last-writer-wins. A set has no `xmin`, so its
+    // version is its contents — and the handler already holds `for update` on
+    // the control while it replaces them, which is what makes comparing the
+    // contents safe (ADR 0019).
+    const id = await control("Contested requirements");
+    const [first, second] = await requirements();
+
+    const read = (await request(`/controls/${id}/requirements`)).headers.get("etag")!;
+
+    const response = await holding(
+      `select * from "control" where "id" = $1 for update`,
+      [id],
+      async ({ session, blocked }) => {
+        const mapping = request(`/controls/${id}/requirements`, {
+          method: "PUT",
+          body: JSON.stringify({ requirementIds: [first] }),
+          headers: { "if-match": read },
+        });
+        await blocked();
+        // Somebody else maps it to the other requirement, and commits.
+        await session.query(
+          `insert into "control_requirement" ("organization_id", "control_id", "requirement_id")
+           values ($1, $2, $3)`,
+          [acme.organizationId, id, second],
+        );
+        await session.query("commit");
+        return mapping;
+      },
+    );
+
+    expect(response.status).toBe(412);
+    // And the set the other writer left is untouched.
+    const { data } = await json<{ data: { id: string }[] }>(
+      await request(`/controls/${id}/requirements`),
+    );
+    expect(data.map((row) => row.id)).toEqual([second]);
+  });
+
+  it("refuses a mapping to a requirement deleted while it waited, rather than failing", async () => {
+    // What `for key share` on the named requirements is for. Deleting the
+    // standard takes its requirements by cascade and holds their rows until it
+    // commits; the replacement waits on that lock and then finds them gone.
+    // With a plain read it would see them, pass the check, and meet the
+    // foreign key on insert instead — a 500 for what is a bad request.
+    const id = await control("Answering to a doomed clause");
+    const imported = await request("/standards", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Doomed",
+        edition: "1",
+        requirements: [{ reference: "1", title: "Soon gone" }],
+      }),
+    });
+    expect(imported.status).toBe(201);
+    const standardId = (await json<{ data: { id: string } }>(imported)).data.id;
+    const { rows } = await admin.query<{ id: string }>(
+      `select "id" from "requirement" where "standard_id" = $1`,
+      [standardId],
+    );
+    const requirementId = rows[0]!.id;
+
+    const response = await holding(
+      `delete from "standard" where "id" = $1`,
+      [standardId],
+      async ({ session, blocked }) => {
+        const mapping = request(`/controls/${id}/requirements`, {
+          method: "PUT",
+          body: JSON.stringify({ requirementIds: [requirementId] }),
+        });
+        await blocked();
+        await session.query("commit");
+        return mapping;
+      },
+    );
+
+    expect(response.status).toBe(400);
+    const { error } = await json<{ error: { details?: { message: string }[] } }>(response);
+    expect(error.details?.[0]?.message).toContain(requirementId);
+  });
+
+  it.each([
+    ["one snapshot", true, "same"],
+    ["a snapshot per statement", false, "different"],
+  ])("reads a collection and its version from %s", async (_case, repeatableRead, expected) => {
+    // Two statements in one transaction see two committed states under `read
+    // committed`, which is right for a write deciding from what is stored now
+    // and wrong for a read whose answers must agree: a page of a collection and
+    // the version describing that collection (ADR 0019).
+    const id = await control(`Snapshot ${expected}`);
+    const [requirementId] = await requirements();
+
+    const mapped = (tx: Parameters<Parameters<typeof withOrganization>[2]>[0]) =>
+      tx
+        .select({ requirementId: schema.controlRequirement.requirementId })
+        .from(schema.controlRequirement)
+        .where(eq(schema.controlRequirement.controlId, id));
+
+    const [before, after] = await withOrganization(
+      db,
+      acme.organizationId,
+      async (tx) => {
+        const first = await mapped(tx);
+        // Somebody else maps it, and commits, between the two reads.
+        await admin.query(
+          `insert into "control_requirement" ("organization_id", "control_id", "requirement_id")
+           values ($1, $2, $3)`,
+          [acme.organizationId, id, requirementId],
+        );
+        return [first, await mapped(tx)] as const;
+      },
+      { repeatableRead },
+    );
+
+    expect(before).toEqual([]);
+    if (expected === "same") expect(after).toEqual(before);
+    else expect(after).toHaveLength(1);
   });
 });
 

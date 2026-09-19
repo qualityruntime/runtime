@@ -14,8 +14,24 @@
 import { auditEventResponse, historyQuery } from "./history.ts";
 import { idPattern, type IdType } from "@qualityruntime/db";
 import { z } from "zod";
-import { controlOrder, controlResponse, createBody, updateBody } from "./controls.ts";
+import {
+  controlOrder,
+  controlResponse,
+  controlRequirementsBody,
+  controlRequirementsOrder,
+  controlRequirementsResponse,
+  createBody,
+  updateBody,
+} from "./controls.ts";
 import { collectionQuery } from "./pagination.ts";
+import { requirementControlsOrder, requirementResponse } from "./requirements.ts";
+import {
+  importBody,
+  requirementOrder,
+  requirementsQuery,
+  standardOrder,
+  standardResponse,
+} from "./standards.ts";
 import { collection, failureResponse, single } from "./responses.ts";
 
 /** OpenAPI 3.1 is JSON Schema draft 2020-12, which is what Zod emits. */
@@ -46,15 +62,23 @@ const fails = (description: string) => responds(description, failureResponse);
  * Declared where one is actually served: a document that asks for `If-Match`
  * and never says where the tag comes from describes half a contract (ADR 0019).
  */
-const versioned = (description: string, schema: z.ZodType) => ({
+const versioned = (
+  description: string,
+  schema: z.ZodType,
+  tag = "The version of what was read. Quote it back in `If-Match` to change only that.",
+) => ({
   ...responds(description, schema),
-  headers: {
-    ETag: {
-      description: "The record's version. Quote it back in `If-Match` to change only this.",
-      schema: { type: "string" },
-    },
-  },
+  headers: { ETag: { description: tag, schema: { type: "string" } } },
 });
+
+/**
+ * A control's requirements are versioned as a whole set, not per page, and a
+ * client assembling the set from pages has to know it (ADR 0010).
+ */
+const setTag =
+  "The version of the whole set, not of this page. A client reading several pages to replace " +
+  "the set needs the same tag on every page, and reads again from the first if one differs; " +
+  "quote it in `If-Match` on the replacement.";
 
 /**
  * Query parameters, one per property of the schema.
@@ -80,6 +104,8 @@ function queryParameters(schema: z.ZodObject) {
 const pathParameterTypes: Record<string, IdType> = {
   organizationId: "organization",
   controlId: "control",
+  standardId: "standard",
+  requirementId: "requirement",
 };
 
 /** Derived from the path itself, so a parameter cannot be left undescribed. */
@@ -102,8 +128,8 @@ const conditional = {
   in: "header",
   required: false,
   description:
-    "The ETag of the record as it was read. Supplied, the write is refused with 412 if the " +
-    "record has changed since; `*` means only if it still exists.",
+    "The ETag of what was read. Supplied, the write is refused with 412 if it has " +
+    "changed since; `*` means only if it still exists.",
   schema: { type: "string" },
 };
 
@@ -113,13 +139,14 @@ type Operation = {
   summary: string;
   query?: z.ZodObject;
   request?: z.ZodType;
-  /** Headers an operation takes, which no schema here describes. */
+  /** Additional request parameters, including optional and required headers. */
   parameters?: unknown[];
   responses: Record<string, { description: string; content?: unknown }>;
 };
 
 const tenant = "/api/v1/organizations/{organizationId}";
 const controls = `${tenant}/controls`;
+const standards = `${tenant}/standards`;
 
 /**
  * Every operation `/api/v1` serves.
@@ -194,6 +221,118 @@ const operations: Operation[] = [
   },
   {
     method: "get",
+    path: `${controls}/{controlId}/requirements`,
+    summary: "List the requirements a control answers to.",
+    // Any control: the published schema is the same whichever it is.
+    query: collectionQuery(controlRequirementsOrder("{controlId}")),
+    responses: {
+      // The tag is the whole set's, so it is the same on every page of it.
+      "200": versioned("A page of requirements.", collection(requirementResponse), setTag),
+      "400": fails("The query is not valid."),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such control."),
+    },
+  },
+  {
+    method: "put",
+    path: `${controls}/{controlId}/requirements`,
+    summary: "Set which requirements a control answers to, replacing the whole set.",
+    parameters: [
+      {
+        ...conditional,
+        description:
+          "The set's ETag, as every page of it was read. Supplied, the replacement is refused " +
+          "with 412 if the set has changed since; `*` means only if the control still exists.",
+      },
+    ],
+    request: controlRequirementsBody,
+    responses: {
+      "200": versioned(
+        "The set as it now stands.",
+        single(controlRequirementsResponse),
+        "The version of the set as it now stands. Quote it in `If-Match` to change it again.",
+      ),
+      "400": fails("The body is not valid, or names a requirement that is not here."),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such control."),
+      "412": fails("The requirements changed since they were read."),
+      "413": fails("The body is too large."),
+    },
+  },
+  {
+    method: "get",
+    path: standards,
+    summary: "List the standards the organization has imported, newest first.",
+    query: collectionQuery(standardOrder),
+    responses: {
+      "200": responds("A page of standards.", collection(standardResponse)),
+      "400": fails("The query is not valid."),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such organization, or the caller is not a member of it."),
+    },
+  },
+  {
+    method: "post",
+    path: standards,
+    summary: "Import a standard with the requirements it states, in one request.",
+    request: importBody,
+    responses: {
+      "201": responds("The standard that was imported.", single(standardResponse)),
+      "400": fails("The body is not valid."),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such organization, or the caller is not a member of it."),
+      "409": fails("That edition of that standard is already here."),
+      "413": fails("The body is too large."),
+    },
+  },
+  {
+    method: "get",
+    path: `${standards}/{standardId}`,
+    summary: "Retrieve one standard.",
+    responses: {
+      "200": responds("The standard.", single(standardResponse)),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such standard."),
+    },
+  },
+  {
+    method: "get",
+    path: `${standards}/{standardId}/requirements`,
+    summary: "List a standard's requirements, in the order the standard states them.",
+    // Any standard: the published schema is the same whichever it is.
+    query: requirementsQuery(requirementOrder("{standardId}")),
+    responses: {
+      "200": responds("A page of requirements.", collection(requirementResponse)),
+      "400": fails("The query is not valid."),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such standard."),
+    },
+  },
+  {
+    method: "get",
+    path: `${tenant}/requirements/{requirementId}`,
+    summary: "Retrieve one requirement, without going through its standard.",
+    responses: {
+      "200": responds("The requirement.", single(requirementResponse)),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such requirement."),
+    },
+  },
+  {
+    method: "get",
+    path: `${tenant}/requirements/{requirementId}/controls`,
+    summary: "List the controls that answer to a requirement, newest first.",
+    // Any requirement: the published schema is the same whichever it is.
+    query: collectionQuery(requirementControlsOrder("{requirementId}")),
+    responses: {
+      "200": responds("A page of controls.", collection(controlResponse)),
+      "400": fails("The query is not valid."),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such requirement."),
+    },
+  },
+  {
+    method: "get",
     path: `${tenant}/history`,
     summary: "Audit history, newest first. Narrow it to one record with `resource`.",
     query: historyQuery(),
@@ -243,7 +382,8 @@ export function openApiDocument(sessionCookie: string) {
       version: "0",
       description:
         "The open-source runtime for quality and compliance. Every tenant-owned resource " +
-        "lives under an organization, and a caller must be a member of it.",
+        "lives under an organization, and a caller must be a member of it. A collection " +
+        "refuses query parameters it does not know rather than ignoring them.",
     },
     components: {
       securitySchemes: {

@@ -48,6 +48,8 @@ Quality Runtime is being designed as a TypeScript application with these layers:
                   email, AI, etc.
 ```
 
+Domain mutation rules still live in route handlers, which use a Hono context to resolve the tenant and attribute changes. Extract them when a non-HTTP caller needs them, into functions taking explicit inputs and actor context; PostgreSQL tenant scoping and audit recording are already available independently of Hono.
+
 Deployment environments sit outside the core application:
 
 ```text
@@ -221,6 +223,8 @@ Applied migrations must not be rewritten.
 
 **AUDIT-01 — Important changes are auditable**
 Material quality and compliance state changes must leave durable audit history.
+
+Changes made by a domain mutation request are audited. What a _foreign key_ does is not: a cascade is a referential action, invisible to the application that triggered it, so removing a standard takes its requirements and removing an organization takes everything with no event for any of it. That is a known hole in this invariant rather than a reading of it — `docs/data-model.md` and [ADR 0010](docs/adr/0010-mapping-controls-to-requirements.md) name each place it bites.
 
 **VERSION-01 — Historical state is preserved where required**
 Controlled or finalized records must not silently lose historical state.

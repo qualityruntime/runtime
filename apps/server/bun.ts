@@ -4,9 +4,8 @@
 /**
  * Bun entry point: the deployment adapter for a long-lived server process.
  *
- * Deployment-specific by design — it reads the environment and owns a
- * connection pool for the life of the process. A Workers entry would sit
- * beside this file and build a per-request client behind Hyperdrive instead
+ * Reads deployment configuration and owns the connection pool for the life of
+ * the process; core code depends on neither this entry point nor its environment
  * (ARCH-01).
  */
 

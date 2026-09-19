@@ -21,13 +21,11 @@ One of those claims was wrong. [ADR 0019](0019-conditional-writes.md) asserted t
 
 **One suite runs against a real PostgreSQL, and only it does.** `apps/server/concurrency.test.ts` is skipped unless `TEST_DATABASE_URL` names a database — so `bun run test` still needs nothing running, and the property that makes the rest of the suite pleasant is kept.
 
-**Each test forces the interleaving rather than hoping for it.** A second session takes the row lock; the request is started and blocks on it; the second session makes its change and commits; the request is released into a world that moved under it. Timing is never relied on.
+**Lock-race tests force the interleaving rather than hoping for it.** A second session takes the row lock; the request is started and blocks on it; the second session makes its change and commits; the request is released into a world that moved under it. Timing is never relied on.
 
-**A request that never blocked fails the test.** This is the part that matters, and the first version got it wrong. Starting a request only schedules it: without waiting for the request to actually block, the other session can finish before the handler has touched the database, and the two never overlap. Every test passed, and removing the locks they were written to exercise changed nothing. The suite now asks PostgreSQL who is waiting — `pg_stat_activity` where `wait_event_type = 'Lock'` — and gives up with an explicit failure if nobody is.
+**A request that never blocked fails the test.** Starting a request only schedules it: the other session could finish before the handler touches the database, letting a test pass without exercising the lock. The helper captures the lock holder's backend PID and recursively follows `pg_blocking_pids` through `pg_stat_activity` in the current database. It requires the requested number of waiters in that holder's queue, including sessions blocked behind another waiter; an unrelated lock wait cannot satisfy the check. Failure to observe those waiters fails the test.
 
-That check cannot filter by role, incidentally: the application switches role after connecting, so `usename` remains the login user. It filters on the database instead, which is sound because the only session deliberately holding a lock is not itself waiting on one.
-
-**It runs as a role that owns nothing and bypasses nothing**, set per connection, so the policies are in force as they are in a deployment. A superuser connection would be exempt from row-level security, and several of these handlers depend on it — an attested row cannot be locked, which is why evidence reads unlisted before it locks.
+**It runs as a role that owns nothing and bypasses nothing**, set per connection, so the policies are in force as they are in a deployment. A superuser connection would be exempt from row-level security, and several of these handlers depend on it — an attested row cannot be locked, which is why evidence reads unlocked before it locks.
 
 **The database is wiped every run**, so the file refuses one whose name does not end in `_test`.
 
@@ -41,7 +39,7 @@ The locks are now load-bearing in a way that can be checked. Removing `FOR UPDAT
 
 **It kept finding things.** A second round added the same foreign-key race one level down — attaching a file read its evidence unlocked and took the key share only at the insert, so a discard landing in between made it a `500`. Fixing that introduced a regression of its own, caught by review rather than by the suite: a locked read is governed by the `UPDATE` policy, which sees only unattested rows, so evidence attested mid-upload came back as "does not exist" rather than "already attested". The same trap this file warns about two paragraphs above, walked into while fixing something else.
 
-And forcing a transaction to fail — by taking away the privilege its audit write needs — showed that `insufficient_privilege` was being read as "the evidence was attested in between" wherever it came from. It now checks the table too, so a privilege error elsewhere in the transaction is no longer answered with a confident wrong diagnosis.
+Revoking the audit insert privilege during an upload verifies transaction rollback and byte cleanup. The handler lets that failure reach the API's internal-error response rather than interpreting it as a concurrent attestation; attestation and deletion conflicts are resolved by reading evidence state under the lock, with an unlocked re-read if the locked read returns nothing.
 
 **It found a third defect, in the race it was written to prove.** [ADR 0013](0013-durable-storage.md) argued that recording evidence and discarding its control cannot interleave, because the foreign key check takes `FOR KEY SHARE` and the discard holds `FOR UPDATE`. True as far as it went — but the recording read its control _without_ a lock and took the key share only at the insert, so a discard landing in between turned it into a foreign key violation and a `500`. It now takes that lock on the read and holds it, which makes the loser lose cleanly: `404` if the control went, `409 has_evidence` if the evidence did.
 

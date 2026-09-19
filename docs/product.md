@@ -20,7 +20,7 @@ A requirement is what a standard asks for. A control is what the organization do
 
 ## Who it is for
 
-**The person accountable for conformity** — a quality manager, a compliance lead, whoever has to say "yes, we do that, and here is why you should believe me". They need to see what is covered and what is not, and to produce a defensible record without assembling it by hand.
+**The person accountable for conformity** — a quality manager, a compliance lead, whoever has to say "yes, we do that, and here is why you should believe me". They need to see what has been taken up and what has not, and to produce a defensible record without assembling it by hand.
 
 **The people who actually operate the controls** — engineers, administrators, anyone who performs the review or runs the restore test. For them the product must be quick and out of the way, or the evidence stops arriving.
 
@@ -36,7 +36,7 @@ These are not aspirations. Each one is already a decision somewhere in `docs/adr
 
 **Record what happened rather than overwrite it.** History is not a feature. A control that was in effect and is now retired, and an attestation made by a person who has since left, are both part of the record — so retiring is what deletion usually means, and attribution survives the actor.
 
-**Say what you know, and not more.** A control mapped to a requirement means somebody _intends_ it to address that requirement. It does not mean the requirement is met, and the product does not let that word creep in. A compliance score computed from mappings would be a number that means nothing, arrived at confidently.
+**Say what you know, and not more.** A control mapped to a requirement means somebody _intends_ it to address that requirement. It does not mean the requirement is met, and the product does not let that word creep in — the filter is called `mapped`, not `covered`. A compliance score computed from mappings would be a number that means nothing, arrived at confidently.
 
 **Model small, and add when something needs it.** Every entity here is narrower than a quality system eventually wants: no owner on a control, no rationale on a mapping, no validity period on evidence. A field added when a workflow needs it is cheaper than one that turned out to mean the wrong thing. The absences are deliberate and written down.
 
@@ -74,7 +74,7 @@ A managed service is planned, and what belongs to it is the operation rather tha
 
 ## Status
 
-The schema for the whole loop is in place, and PostgreSQL enforces its tenancy and finality: standards, requirements, controls, mappings, evidence, attestation and files. The API serves the first part of it: controls can be created, changed, moved through their lifecycle and — while they never took effect — discarded, and every change is audited and readable as history. Standards, mappings, evidence and files are not yet reachable through the API.
+The schema for the whole loop is in place, and PostgreSQL enforces its tenancy and finality: standards, requirements, controls, mappings, evidence, attestation and files. The API serves the first part of it: standards can be imported, and controls created, changed, moved through their lifecycle, mapped to the requirements they answer and — while they never took effect — discarded, and every change is audited and readable as history. Evidence and files are not yet reachable through the API.
 
 There is no user interface, no deployment artifact, and none of the entities beyond that loop.
 

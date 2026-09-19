@@ -266,18 +266,22 @@ describe("the requests it promises to accept", () => {
   });
 
   it.each([
-    ["get", "/api/v1/organizations/{organizationId}/controls/{controlId}"],
-    ["patch", "/api/v1/organizations/{organizationId}/controls/{controlId}"],
-    ["get", "/api/v1/organizations/{organizationId}/controls/{controlId}/requirements"],
-    ["put", "/api/v1/organizations/{organizationId}/controls/{controlId}/requirements"],
-  ])("says that %s %s answers with an ETag", (method, path) => {
+    ["get", "/api/v1/organizations/{organizationId}/controls/{controlId}", "200"],
+    ["patch", "/api/v1/organizations/{organizationId}/controls/{controlId}", "200"],
+    ["get", "/api/v1/organizations/{organizationId}/evidence/{evidenceId}", "200"],
+    ["patch", "/api/v1/organizations/{organizationId}/evidence/{evidenceId}", "200"],
+    ["post", "/api/v1/organizations/{organizationId}/controls/{controlId}/evidence", "201"],
+    ["get", "/api/v1/organizations/{organizationId}/controls/{controlId}/requirements", "200"],
+    ["put", "/api/v1/organizations/{organizationId}/controls/{controlId}/requirements", "200"],
+  ])("says that %s %s answers %s with an ETag", (method, path, status) => {
     // A document that asks for `If-Match` and never says where the tag comes
-    // from describes half a contract (ADR 0019).
+    // from describes half a contract (ADR 0019). Recording evidence answers
+    // with one too, so that it can be attested without a second read.
     const operation = (
       openApiDocument(sessionCookieName(auth)).paths[path] as Record<string, unknown>
     )[method] as { responses: Record<string, { headers?: Record<string, unknown> }> };
 
-    expect(operation.responses["200"]?.headers).toHaveProperty("ETag");
+    expect(operation.responses[status]?.headers).toHaveProperty("ETag");
   });
 
   it("publishes where a cursor comes from", () => {
@@ -534,5 +538,103 @@ describe("the responses it promises for standards and mappings", () => {
       `${tenant}/controls/{controlId}/requirements`,
       response,
     );
+  });
+});
+
+describe("the responses it promises for evidence", () => {
+  const tenant = "/api/v1/organizations/{organizationId}";
+  const one = `${tenant}/evidence/{evidenceId}`;
+  let document: Document;
+  let controlId: string;
+  let requirementId: string;
+
+  const at = (
+    path: string,
+    init: Omit<RequestInit, "headers"> & { headers?: Record<string, string> } = {},
+  ) =>
+    app.request(`/api/v1/organizations/${acme.organizationId}${path}`, {
+      ...init,
+      headers: {
+        cookie: acme.cookie,
+        ...(init.body ? { "content-type": "application/json" } : {}),
+        ...init.headers,
+      },
+    });
+
+  /** Records evidence and answers its id and the tag it came back with. */
+  const recorded = async (title: string) => {
+    const response = await at(`/controls/${controlId}/evidence`, {
+      method: "POST",
+      body: JSON.stringify({ title, occurredAt: "2026-07-01T09:00:00.000Z" }),
+    });
+    expect(response.status).toBe(201);
+    return {
+      id: ((await response.clone().json()) as { data: { id: string } }).data.id,
+      tag: response.headers.get("etag")!,
+      response,
+    };
+  };
+
+  beforeAll(async () => {
+    document = openApiDocument(sessionCookieName(auth));
+    controlId = (await create("Evidenced")).id;
+    const imported = await at("/standards", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Evidenced standard",
+        edition: "1",
+        requirements: [{ reference: "1", title: "One" }],
+      }),
+    });
+    const standardId = (await json<{ data: { id: string } }>(imported)).data.id;
+    const listed = await at(`/standards/${standardId}/requirements`);
+    requirementId = (await json<{ data: { id: string }[] }>(listed)).data[0]!.id;
+    await at(`/controls/${controlId}/requirements`, {
+      method: "PUT",
+      body: JSON.stringify({ requirementIds: [requirementId] }),
+    });
+  });
+
+  it("describes recorded evidence", async () => {
+    const { response } = await recorded("Recorded");
+
+    await conformsToDocument(document, "post", `${tenant}/controls/{controlId}/evidence`, response);
+  });
+
+  it.each([
+    ["one piece of evidence", "get", one],
+    ["an amendment", "patch", one],
+    ["an attestation", "put", `${one}/attestation`],
+  ])("describes %s", async (_case, method, documented) => {
+    const { id, tag } = await recorded(`For ${method}`);
+    const init =
+      method === "patch"
+        ? { method: "PATCH", body: JSON.stringify({ title: "Amended" }) }
+        : method === "put"
+          ? { method: "PUT", headers: { "if-match": tag } }
+          : {};
+
+    const response = await at(documented.replace(tenant, "").replace("{evidenceId}", id), init);
+
+    expect(response.status).toBe(200);
+    await conformsToDocument(document, method, documented, response);
+  });
+
+  it.each([
+    ["a control's evidence", `${tenant}/controls/{controlId}/evidence`],
+    ["a requirement's evidence", `${tenant}/requirements/{requirementId}/evidence`],
+  ])("describes a page of %s, with an item in it", async (_case, documented) => {
+    await recorded("Listed");
+    const response = await at(
+      documented
+        .replace(tenant, "")
+        .replace("{controlId}", controlId)
+        .replace("{requirementId}", requirementId),
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.clone().json()) as { data: unknown[] };
+    expect(body.data.length).toBeGreaterThan(0);
+    await conformsToDocument(document, "get", documented, response);
   });
 });

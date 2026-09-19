@@ -20,7 +20,7 @@ type AuditFields = schema.AuditFields;
  * out which record an identifier names. One source, so a new entity cannot be
  * recordable and unreadable.
  */
-export const resourceTypes = ["control", "standard"] as const;
+export const resourceTypes = ["control", "evidence", "standard"] as const;
 
 export type ResourceType = (typeof resourceTypes)[number];
 
@@ -41,7 +41,7 @@ export type Change = Records &
   (
     | { action: "created"; before?: never; after: AuditFields }
     | { action: "deleted"; before: AuditFields; after?: never }
-    | { action: "updated"; before?: AuditFields; after: AuditFields }
+    | { action: "updated" | "attested"; before?: AuditFields; after: AuditFields }
   );
 
 /** Who the change is attributed to, resolved once per request. */

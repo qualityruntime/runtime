@@ -12,6 +12,7 @@ import { controls } from "./controls.ts";
 import { failure } from "./responses.ts";
 import { openApiDocument, openApiPath, referencePath } from "./openapi.ts";
 import { organizationContext } from "./organization.ts";
+import { evidence } from "./evidence.ts";
 import { history } from "./history.ts";
 import { requirements } from "./requirements.ts";
 import { standards } from "./standards.ts";
@@ -108,5 +109,6 @@ export function createApp<Q extends PgQueryResultHKT>({
       .route(tenant, history)
       .route(tenant, standards)
       .route(tenant, requirements)
+      .route(tenant, evidence)
   );
 }

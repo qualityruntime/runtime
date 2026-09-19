@@ -253,6 +253,19 @@ describe.each(documents)("the setup in $path", ({ path, heading }) => {
     const history = await request(`/history?resource=${controlId}`);
     expect(history.status).toBe(200);
 
+    const evidence = await request(
+      `/controls/${controlId}/evidence`,
+      asJson({ title: "Q3 review", occurredAt: "2026-07-01T09:00:00.000Z" }),
+    );
+    expect(evidence.status).toBe(201);
+    const evidenceId = (await json<{ data: { id: string } }>(evidence)).data.id;
+    const read = await request(`/evidence/${evidenceId}`);
+    const attested = await request(`/evidence/${evidenceId}/attestation`, {
+      method: "PUT",
+      headers: { "if-match": read.headers.get("etag")! },
+    });
+    expect(attested.status).toBe(200);
+
     const standard = await request(
       "/standards",
       asJson({

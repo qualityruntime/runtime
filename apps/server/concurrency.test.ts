@@ -199,6 +199,21 @@ const requirements = async (): Promise<[string, string]> => {
   return [rows[0]!.id, rows[1]!.id];
 };
 
+const evidenceFor = async (controlId: string, title: string) => {
+  const response = await request(`/controls/${controlId}/evidence`, {
+    method: "POST",
+    body: JSON.stringify({ title, occurredAt: "2026-07-01T09:00:00.000Z" }),
+  });
+  expect(response.status).toBe(201);
+  return (await json<{ data: { id: string } }>(response)).data.id;
+};
+
+const tagOf = async (path: string) => {
+  const response = await request(path);
+  expect(response.status).toBe(200);
+  return response.headers.get("etag")!;
+};
+
 beforeAll(async () => {
   if (!usable) return;
 
@@ -338,50 +353,162 @@ describe.skipIf(!usable)("what a lock actually prevents", () => {
     expect((await json<{ data: { status: string } }>(response)).data.status).toBe("retired");
   });
 
-  it("lets two amendments through in turn, and records what each replaced", async () => {
-    // Serialised rather than refused: neither names a version, so neither is
-    // asking to be protected. What must not happen is an audit event claiming
-    // to have replaced something it did not — the second amendment's `before`
-    // has to be what the first wrote, not what it read before the first ran.
-    //
-    // `Promise.all` alone would not force that: it starts both requests, it
-    // does not make their reads overlap. Both have to be waiting on the same
-    // lock before either is let go.
-    const id = await control("Original");
+  it("refuses a conditional discard of evidence amended while it waited", async () => {
+    // The race that shipped. The tag was compared against an unlocked read, so
+    // the amendment below landed between the comparison and the delete and the
+    // evidence went anyway — with the caller none the wiser.
+    const id = await control("For the evidence");
+    const evidenceId = await evidenceFor(id, "Read, then amended");
+    const read = await tagOf(`/evidence/${evidenceId}`);
 
-    const [first, second] = await holding(
-      `select * from "control" where "id" = $1 for update`,
-      [id],
+    const response = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
       async ({ session, blocked }) => {
-        const both = Promise.all([
-          request(`/controls/${id}`, {
-            method: "PATCH",
-            body: JSON.stringify({ name: "One" }),
-          }),
-          request(`/controls/${id}`, {
-            method: "PATCH",
-            body: JSON.stringify({ name: "Two" }),
-          }),
+        const discarding = request(`/evidence/${evidenceId}`, {
+          method: "DELETE",
+          headers: { "if-match": read },
+        });
+        await blocked();
+        await session.query(`update "evidence" set "title" = 'Amended' where "id" = $1`, [
+          evidenceId,
         ]);
-        await blocked(2);
         await session.query("commit");
-        return both;
+        return discarding;
       },
     );
 
-    expect([first.status, second.status]).toEqual([200, 200]);
-    const { data } = await json<{ data: { action: string; before: { name?: string } | null }[] }>(
-      await request(`/history?resource=${id}`),
+    expect(response.status).toBe(412);
+    // And the evidence is still there, carrying the amendment.
+    const { data } = await json<{ data: { title: string } }>(
+      await request(`/evidence/${evidenceId}`),
     );
-    const replaced = data
-      .filter((event) => event.action === "updated")
-      .map((event) => event.before?.name);
-
-    expect(replaced).toHaveLength(2);
-    // One replaced the original; the other replaced whatever the first wrote.
-    expect(replaced).toContain("Original");
-    expect(new Set(replaced).size).toBe(2);
+    expect(data.title).toBe("Amended");
   });
+
+  it("refuses a conditional amendment of evidence amended while it waited", async () => {
+    const id = await control("For the other amendment");
+    const evidenceId = await evidenceFor(id, "Also read first");
+    const read = await tagOf(`/evidence/${evidenceId}`);
+
+    const response = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
+      async ({ session, blocked }) => {
+        const amending = request(`/evidence/${evidenceId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ title: "Mine" }),
+          headers: { "if-match": read },
+        });
+        await blocked();
+        await session.query(`update "evidence" set "title" = 'Theirs' where "id" = $1`, [
+          evidenceId,
+        ]);
+        await session.query("commit");
+        return amending;
+      },
+    );
+
+    expect(response.status).toBe(412);
+    const { data } = await json<{ data: { title: string } }>(
+      await request(`/evidence/${evidenceId}`),
+    );
+    expect(data.title).toBe("Theirs");
+  });
+
+  it("refuses an attestation of evidence amended while it waited", async () => {
+    // Attesting takes no lock before comparing — an attested row could not be
+    // locked anyway — so it repeats the version in its `UPDATE` instead. This
+    // is what that repetition is for.
+    const id = await control("For the signature");
+    const evidenceId = await evidenceFor(id, "About to be signed");
+    const read = await tagOf(`/evidence/${evidenceId}`);
+
+    const response = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
+      async ({ session, blocked }) => {
+        const attesting = request(`/evidence/${evidenceId}/attestation`, {
+          method: "PUT",
+          headers: { "if-match": read },
+        });
+        await blocked();
+        await session.query(`update "evidence" set "title" = 'Changed first' where "id" = $1`, [
+          evidenceId,
+        ]);
+        await session.query("commit");
+        return attesting;
+      },
+    );
+
+    expect(response.status).toBe(412);
+    const { data } = await json<{ data: { attestation: unknown } }>(
+      await request(`/evidence/${evidenceId}`),
+    );
+    expect(data.attestation).toBeNull();
+  });
+
+  it.each([
+    ["the discard", "discard"],
+    ["the recording", "record"],
+  ])(
+    "never both discards a control and records evidence against it, %s first",
+    async (_case, first) => {
+      // This was argued from lock conflicts before it was shown: recording
+      // evidence needs `for key share` on its control for the foreign key check,
+      // which conflicts with the `for update` a discard holds. So the two cannot
+      // interleave — and whichever loses must lose *cleanly*, not with a foreign
+      // key violation surfacing as a 500.
+      //
+      // Both orders, and each forced: a lock queue is first-come, so starting one
+      // request and waiting for it to join the queue before starting the other
+      // decides which wins. Leaving it to chance would make this pass whenever
+      // the order happened to be the harmless one.
+      const id = await control(`Contested ${first}`);
+      const discard = () => request(`/controls/${id}`, { method: "DELETE" });
+      const record = () =>
+        request(`/controls/${id}/evidence`, {
+          method: "POST",
+          body: JSON.stringify({ title: "Racing", occurredAt: "2026-07-01T09:00:00.000Z" }),
+        });
+
+      const [discarded, recorded] = await holding(
+        `select * from "control" where "id" = $1 for update`,
+        [id],
+        async ({ session, blocked }) => {
+          const ahead = first === "discard" ? discard() : record();
+          await blocked(1);
+          const behind = first === "discard" ? record() : discard();
+          await blocked(2);
+          await session.query("commit");
+          const settled = await Promise.all([ahead, behind]);
+          return first === "discard" ? settled : [settled[1]!, settled[0]!];
+        },
+      );
+
+      // Neither is a server error, whichever went first.
+      expect(discarded.status).not.toBe(500);
+      expect(recorded.status).not.toBe(500);
+
+      const gone = (await request(`/controls/${id}`)).status === 404;
+      if (first === "discard") {
+        // The discard was ahead, so it took the control and the recording found
+        // nothing to record against.
+        expect(discarded.status).toBe(204);
+        expect(gone).toBe(true);
+        expect(recorded.status).toBe(404);
+      } else {
+        // The recording was ahead, so the control now carries evidence and may
+        // not be discarded at all.
+        expect(recorded.status).toBe(201);
+        expect(gone).toBe(false);
+        expect(discarded.status).toBe(409);
+        expect((await json<{ error: { code: string } }>(discarded)).error.code).toBe(
+          "has_evidence",
+        );
+      }
+    },
+  );
 
   it("refuses a conditional remapping of a control remapped while it waited", async () => {
     // The last mutation that was last-writer-wins. A set has no `xmin`, so its
@@ -500,6 +627,199 @@ describe.skipIf(!usable)("what a lock actually prevents", () => {
     expect(before).toEqual([]);
     if (expected === "same") expect(after).toEqual(before);
     else expect(after).toHaveLength(1);
+  });
+
+  it.each([
+    ["amending", "PATCH"],
+    ["discarding", "DELETE"],
+  ])("says gone, not signed, when evidence is discarded while %s it", async (_case, method) => {
+    // A locked read is governed by the UPDATE policy, so an empty result means
+    // the row is attested — or that it was deleted while this transaction
+    // waited for the lock. The two are indistinguishable from the lock alone,
+    // and answering "already attested" for something discarded and never
+    // signed is a confident wrong answer.
+    const id = await control(`Discarded while ${method}`);
+    const evidenceId = await evidenceFor(id, "About to be discarded");
+
+    const response = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
+      async ({ session, blocked }) => {
+        const attempt = request(`/evidence/${evidenceId}`, {
+          method,
+          ...(method === "PATCH" ? { body: JSON.stringify({ title: "Mine" }) } : {}),
+        });
+        await blocked();
+        await session.query('delete from "evidence" where "id" = $1', [evidenceId]);
+        await session.query("commit");
+        return attempt;
+      },
+    );
+
+    expect(response.status).toBe(404);
+    expect((await json<{ error: { code: string } }>(response)).error.code).toBe("not_found");
+  });
+
+  it("lets two amendments through in turn, and records what each replaced", async () => {
+    // Serialised rather than refused: neither names a version, so neither is
+    // asking to be protected. What must not happen is an audit event claiming
+    // to have replaced something it did not — the second amendment's `before`
+    // has to be what the first wrote, not what it read before the first ran.
+    //
+    // `Promise.all` alone would not force that: it starts both requests, it
+    // does not make their reads overlap. Both have to be waiting on the same
+    // lock before either is let go.
+    const id = await control("Original");
+
+    const [first, second] = await holding(
+      `select * from "control" where "id" = $1 for update`,
+      [id],
+      async ({ session, blocked }) => {
+        const both = Promise.all([
+          request(`/controls/${id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ name: "One" }),
+          }),
+          request(`/controls/${id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ name: "Two" }),
+          }),
+        ]);
+        await blocked(2);
+        await session.query("commit");
+        return both;
+      },
+    );
+
+    expect([first.status, second.status]).toEqual([200, 200]);
+    const { data } = await json<{ data: { action: string; before: { name?: string } | null }[] }>(
+      await request(`/history?resource=${id}`),
+    );
+    const replaced = data
+      .filter((event) => event.action === "updated")
+      .map((event) => event.before?.name);
+
+    expect(replaced).toHaveLength(2);
+    // One replaced the original; the other replaced whatever the first wrote.
+    expect(replaced).toContain("Original");
+    expect(new Set(replaced).size).toBe(2);
+  });
+
+  it.each([
+    ["attested", 409, "already_attested"],
+    ["discarded", 404, "not_found"],
+  ])(
+    "answers %s rather than stale when evidence is %s while an attestation waits",
+    async (what, status, code) => {
+      // Attesting waits on the UPDATE lock and checks the version there.
+      // Matching nothing has three causes; only an amendment is "stale".
+      const id = await control(`Attestation meets ${what}`);
+      const evidenceId = await evidenceFor(id, `To be ${what} first`);
+      const read = await tagOf(`/evidence/${evidenceId}`);
+
+      const response = await holding(
+        `select * from "evidence" where "id" = $1 for update`,
+        [evidenceId],
+        async ({ session, blocked }) => {
+          const attesting = request(`/evidence/${evidenceId}/attestation`, {
+            method: "PUT",
+            headers: { "if-match": read },
+          });
+          await blocked();
+          await session.query(
+            what === "attested"
+              ? `update "evidence" set "attested_at" = now(), "attested_by_id" = 'usr_0000000000000000',
+                 "attested_by_label" = 'Someone else' where "id" = $1`
+              : `delete from "evidence" where "id" = $1`,
+            [evidenceId],
+          );
+          await session.query("commit");
+          return attesting;
+        },
+      );
+
+      expect(response.status).toBe(status);
+      expect((await json<{ error: { code: string } }>(response)).error.code).toBe(code);
+    },
+  );
+
+  it.each([
+    ["amending", "PATCH"],
+    ["discarding", "DELETE"],
+  ])("says signed, not gone, when evidence is attested while %s it", async (_case, method) => {
+    // The other half of what an empty locked read can mean: attested rows are
+    // invisible to the UPDATE policy that governs the lock, so the re-read is
+    // what tells this from a discard.
+    const id = await control(`Attested while ${method}`);
+    const evidenceId = await evidenceFor(id, "About to be signed");
+
+    const response = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
+      async ({ session, blocked }) => {
+        const attempt = request(`/evidence/${evidenceId}`, {
+          method,
+          ...(method === "PATCH" ? { body: JSON.stringify({ title: "Mine" }) } : {}),
+        });
+        await blocked();
+        await session.query(
+          `update "evidence" set "attested_at" = now(), "attested_by_id" = 'usr_0000000000000000',
+           "attested_by_label" = 'Someone else' where "id" = $1`,
+          [evidenceId],
+        );
+        await session.query("commit");
+        return attempt;
+      },
+    );
+
+    expect(response.status).toBe(409);
+    expect((await json<{ error: { code: string } }>(response)).error.code).toBe("already_attested");
+  });
+
+  it("lets two evidence amendments through in turn, and records what each replaced", async () => {
+    // Serialised rather than refused: neither names a version, so neither is
+    // asking to be protected. What must not happen is an audit event claiming
+    // to have replaced something it did not — the second amendment's `before`
+    // has to be what the first wrote, not what it read before the first ran.
+    //
+    // `Promise.all` alone would not force that: it starts both requests, it
+    // does not make their reads overlap. Both have to be waiting on the same
+    // lock before either is let go.
+    const id = await control("Amended twice");
+    const evidenceId = await evidenceFor(id, "Original");
+
+    const [first, second] = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
+      async ({ session, blocked }) => {
+        const both = Promise.all([
+          request(`/evidence/${evidenceId}`, {
+            method: "PATCH",
+            body: JSON.stringify({ title: "One" }),
+          }),
+          request(`/evidence/${evidenceId}`, {
+            method: "PATCH",
+            body: JSON.stringify({ title: "Two" }),
+          }),
+        ]);
+        await blocked(2);
+        await session.query("commit");
+        return both;
+      },
+    );
+
+    expect([first.status, second.status]).toEqual([200, 200]);
+    const { data } = await json<{ data: { action: string; before: { title?: string } | null }[] }>(
+      await request(`/history?resource=${evidenceId}`),
+    );
+    const replaced = data
+      .filter((event) => event.action === "updated")
+      .map((event) => event.before?.title);
+
+    expect(replaced).toHaveLength(2);
+    // One replaced the original; the other replaced whatever the first wrote.
+    expect(replaced).toContain("Original");
+    expect(new Set(replaced).size).toBe(2);
   });
 });
 

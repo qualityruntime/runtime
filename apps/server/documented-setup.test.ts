@@ -238,7 +238,7 @@ describe.each(documents)("the setup in $path", ({ path, heading }) => {
     const request = (suffix: string, init: Request = {}) =>
       app.request(`${base}${suffix}`, { ...init, headers: { cookie, ...init.headers } });
 
-    // Every route there is, on privileges the document alone produced.
+    // The loop so far, on privileges the document alone produced.
     const control = await request("/controls", asJson({ name: "Access review" }));
     expect(control.status).toBe(201);
     const controlId = (await json<{ data: { id: string } }>(control)).data.id;
@@ -252,6 +252,26 @@ describe.each(documents)("the setup in $path", ({ path, heading }) => {
 
     const history = await request(`/history?resource=${controlId}`);
     expect(history.status).toBe(200);
+
+    const standard = await request(
+      "/standards",
+      asJson({
+        name: "ISO 9001",
+        edition: "2015",
+        requirements: [{ reference: "7.5.3", title: "Documented information" }],
+      }),
+    );
+    expect(standard.status).toBe(201);
+    const standardId = (await json<{ data: { id: string } }>(standard)).data.id;
+    const requirements = await request(`/standards/${standardId}/requirements`);
+    const requirementId = (await json<{ data: { id: string }[] }>(requirements)).data[0]!.id;
+
+    const mapped = await request(`/controls/${controlId}/requirements`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ requirementIds: [requirementId] }),
+    });
+    expect(mapped.status).toBe(200);
 
     // The refusals the revoke block exists for.
     const refused = async (statement: string) => {

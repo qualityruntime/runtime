@@ -76,7 +76,7 @@ Then, once the tables exist, take back what no policy would ever allow anyway:
 ```sql
 REVOKE UPDATE, DELETE ON "audit_event"          FROM qualityruntime;  -- append-only (ADR 0005)
 REVOKE UPDATE, DELETE ON "file"                 FROM qualityruntime;  -- attached for good
-REVOKE UPDATE         ON "control_requirement"  FROM qualityruntime;  -- a link is made or unmade
+REVOKE UPDATE         ON "control_requirement"  FROM qualityruntime;  -- a link is made or unmade (ADR 0010)
 REVOKE DELETE         ON "organization"         FROM qualityruntime;  -- see below
 ```
 

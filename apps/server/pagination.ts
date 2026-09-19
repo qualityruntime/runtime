@@ -5,12 +5,12 @@
  * How `/api/v1` collections are paged.
  *
  * A collection is ordered by a key and the identifier that breaks its ties, and
- * paged by a cursor naming the last row of the page before. Collections that
- * record what happened are newest first. Reasoning:
- * `docs/adr/0006-cursor-paged-collections.md`.
+ * paged by a cursor naming the last row of the page before. Most collections
+ * are newest first; a standard's requirements are in the order the standard
+ * states them. Reasoning: `docs/adr/0006-cursor-paged-collections.md`.
  */
 
-import { desc, sql, type SQL } from "drizzle-orm";
+import { asc, desc, sql, type SQL } from "drizzle-orm";
 import type { PgColumn } from "drizzle-orm/pg-core";
 import { z } from "zod";
 
@@ -24,13 +24,14 @@ import { z } from "zod";
  */
 export type Ordering = {
   readonly name: string;
-  /** Newest first: every collection so far records what has happened. */
+  readonly direction: "asc" | "desc";
   readonly key: PgColumn;
   readonly id: PgColumn;
   /** The key rendered losslessly as text, for the cursor. */
   readonly keyAsText: SQL<string>;
   /** Whether text coming back is something the cast below will accept. */
   readonly keyIsValid: (value: string) => boolean;
+  readonly keyType: "timestamptz" | "integer";
 };
 
 /** The shape a timestamp key takes. Says nothing about whether it exists. */
@@ -53,6 +54,10 @@ function isRealInstant(value: string): boolean {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === millisecond;
 }
 
+/** Anything `integer` holds, and nothing that would overflow the cast. */
+const isInt32 = (value: string) =>
+  /^-?\d{1,10}$/.test(value) && Number(value) >= -2_147_483_648 && Number(value) <= 2_147_483_647;
+
 /**
  * Newest first — the ordering of a collection that is a record of what has
  * happened rather than a document with an order of its own.
@@ -65,10 +70,28 @@ function isRealInstant(value: string): boolean {
  */
 export const newestFirst = (collection: string, createdAt: PgColumn, id: PgColumn): Ordering => ({
   name: `${collection}:recent`,
+  direction: "desc",
   key: createdAt,
   id,
   keyAsText: sql<string>`to_char(${createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
   keyIsValid: isRealInstant,
+  keyType: "timestamptz",
+});
+
+/**
+ * The order a document states things in, lowest position first.
+ *
+ * Positions may tie — a standard's clauses are not renumbered to insert one —
+ * so the identifier is as much a part of the key here as anywhere.
+ */
+export const asStated = (collection: string, position: PgColumn, id: PgColumn): Ordering => ({
+  name: `${collection}:stated`,
+  direction: "asc",
+  key: position,
+  id,
+  keyAsText: sql<string>`${position}::text`,
+  keyIsValid: isInt32,
+  keyType: "integer",
 });
 
 /** The position of a row in a collection's order. */
@@ -91,11 +114,13 @@ const encodeCursor = ({ ordering, key, id }: Cursor): string =>
  * The query a collection ordered by `ordering` accepts.
  *
  * A cursor must name this ordering and carry a valid key and identifier shape.
- * Values PostgreSQL refuses — a NUL, a year outside its range — would otherwise
- * turn a bad request into a 500.
+ * Values PostgreSQL refuses — a NUL, a year outside its range, an overflowing
+ * integer — would otherwise turn a bad request into a 500.
  */
 export const collectionQuery = (ordering: Ordering) =>
-  z.object({
+  // Strict: a misspelt filter dropped silently answers a different question
+  // with a page that looks right.
+  z.strictObject({
     limit: z.coerce.number().int().min(1).max(100).default(25),
     cursor: z
       .string()
@@ -130,7 +155,10 @@ export const collectionQuery = (ordering: Ordering) =>
 export const cursorAt = (ordering: Ordering) => ordering.keyAsText;
 
 /** The collection's order, for the query that reads it. */
-export const orderedBy = (ordering: Ordering) => [desc(ordering.key), desc(ordering.id)] as const;
+export const orderedBy = (ordering: Ordering) =>
+  ordering.direction === "desc"
+    ? ([desc(ordering.key), desc(ordering.id)] as const)
+    : ([asc(ordering.key), asc(ordering.id)] as const);
 
 /**
  * Restricts a query to the rows after `cursor` in the collection's order.
@@ -141,16 +169,21 @@ export const orderedBy = (ordering: Ordering) => [desc(ordering.key), desc(order
  * concurrent inserts and deletes, which can repeat or skip rows.
  */
 export function rowsAfter(ordering: Ordering, cursor: Cursor): SQL {
-  return sql`(${ordering.key}, ${ordering.id}) < (${cursor.key}::timestamptz, ${cursor.id}::text)`;
+  const bound =
+    ordering.keyType === "timestamptz"
+      ? sql`${cursor.key}::timestamptz`
+      : sql`${cursor.key}::integer`;
+  return ordering.direction === "desc"
+    ? sql`(${ordering.key}, ${ordering.id}) < (${bound}, ${cursor.id}::text)`
+    : sql`(${ordering.key}, ${ordering.id}) > (${bound}, ${cursor.id}::text)`;
 }
 
 /**
  * Splits rows fetched with `limit + 1` into a page and the cursor after it.
  *
- * Asking for one more row than the page holds is how the last page is known
- * exactly, without a second query and without a count that would be wrong by
- * the time it was read. `cursorAt` is dropped on the way out: it is how a page
- * is found, not something a caller asked for.
+ * The extra row tells whether more matched this query, without a second query
+ * or a total count. Later pages may see changed data. `cursorAt` is dropped on
+ * the way out: it locates the page and is not part of the response.
  */
 export function page<T extends { id: string; cursorAt: string }>(
   rows: T[],

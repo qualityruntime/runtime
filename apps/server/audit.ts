@@ -20,7 +20,7 @@ type AuditFields = schema.AuditFields;
  * out which record an identifier names. One source, so a new entity cannot be
  * recordable and unreadable.
  */
-export const resourceTypes = ["control"] as const;
+export const resourceTypes = ["control", "standard"] as const;
 
 export type ResourceType = (typeof resourceTypes)[number];
 

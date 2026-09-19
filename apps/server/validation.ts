@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Request body validation for `/api/v1`.
+ * Request body and query validation for `/api/v1`.
  *
  * Hono's own `validator` does the plumbing; this only decides what a rejection
  * looks like, which is part of the API contract rather than of any one route.
@@ -66,8 +66,8 @@ export const rejection = (what: string, error: z.ZodError) =>
 /**
  * Parses a JSON body against `schema`, answering 400 when it does not fit.
  *
- * The supplied schema decides how to handle unknown properties. Current
- * request objects use `z.object`, which strips them for client compatibility.
+ * The supplied schema decides how to handle unknown properties: control
+ * bodies strip them, while standard imports reject them.
  */
 export const jsonBody = <T extends z.ZodType>(schema: T) =>
   validator("json", (value, c) => {

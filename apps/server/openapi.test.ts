@@ -198,6 +198,17 @@ describe("the document", () => {
 
     expect(cursor?.schema.type).toBe("string");
   });
+
+  it("documents looking a requirement up by the reference people cite", () => {
+    const document = openApiDocument(sessionCookieName(auth));
+    const list = document.paths[
+      "/api/v1/organizations/{organizationId}/standards/{standardId}/requirements"
+    ]!.get as { parameters: { name: string; required?: boolean; schema: { type: string } }[] };
+    const reference = list.parameters.find((parameter) => parameter.name === "reference");
+
+    expect(reference?.schema.type).toBe("string");
+    expect(reference?.required).not.toBe(true);
+  });
 });
 
 describe("the requests it promises to accept", () => {
@@ -257,6 +268,8 @@ describe("the requests it promises to accept", () => {
   it.each([
     ["get", "/api/v1/organizations/{organizationId}/controls/{controlId}"],
     ["patch", "/api/v1/organizations/{organizationId}/controls/{controlId}"],
+    ["get", "/api/v1/organizations/{organizationId}/controls/{controlId}/requirements"],
+    ["put", "/api/v1/organizations/{organizationId}/controls/{controlId}/requirements"],
   ])("says that %s %s answers with an ETag", (method, path) => {
     // A document that asks for `If-Match` and never says where the tag comes
     // from describes half a contract (ADR 0019).
@@ -403,5 +416,123 @@ describe("the responses it promises", () => {
 
     expect(response.status).toBe(400);
     await conformsToDocument(document, "post", controls, response);
+  });
+});
+
+describe("the responses it promises for standards and mappings", () => {
+  const tenant = "/api/v1/organizations/{organizationId}";
+  let document: Document;
+
+  const at = (
+    path: string,
+    init: Omit<RequestInit, "headers"> & { headers?: Record<string, string> } = {},
+  ) =>
+    app.request(`/api/v1/organizations/${acme.organizationId}${path}`, {
+      ...init,
+      headers: {
+        cookie: acme.cookie,
+        ...(init.body ? { "content-type": "application/json" } : {}),
+        ...init.headers,
+      },
+    });
+
+  /** One of each shape: the standard, a requirement, and a mapped control. */
+  let standardId: string;
+  let requirementId: string;
+  let controlId: string;
+
+  beforeAll(async () => {
+    document = openApiDocument(sessionCookieName(auth));
+    const imported = await at("/standards", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "ISO 9001",
+        edition: "2015",
+        requirements: [{ reference: "7.5.3", title: "Documented information" }],
+      }),
+    });
+    standardId = (await json<{ data: { id: string } }>(imported)).data.id;
+    const listed = await at(`/standards/${standardId}/requirements`);
+    requirementId = (await json<{ data: { id: string }[] }>(listed)).data[0]!.id;
+    controlId = (await create("Mapped")).id;
+    const mapped = await at(`/controls/${controlId}/requirements`, {
+      method: "PUT",
+      body: JSON.stringify({ requirementIds: [requirementId] }),
+    });
+    expect(mapped.status).toBe(200);
+  });
+
+  it.each([
+    ["get", "/standards", `${tenant}/standards`],
+    ["get", "/standards/{standardId}", `${tenant}/standards/{standardId}`],
+    [
+      "get",
+      "/standards/{standardId}/requirements",
+      `${tenant}/standards/{standardId}/requirements`,
+    ],
+    ["get", "/requirements/{requirementId}", `${tenant}/requirements/{requirementId}`],
+    [
+      "get",
+      "/requirements/{requirementId}/controls",
+      `${tenant}/requirements/{requirementId}/controls`,
+    ],
+    ["get", "/controls/{controlId}/requirements", `${tenant}/controls/{controlId}/requirements`],
+  ])("describes %s %s", async (method, path, documented) => {
+    const response = await at(
+      path
+        .replace("{standardId}", standardId)
+        .replace("{requirementId}", requirementId)
+        .replace("{controlId}", controlId),
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.clone().json()) as { data: unknown };
+    // A collection must carry an item, or only the envelope is checked.
+    if (Array.isArray(body.data)) expect(body.data.length).toBeGreaterThan(0);
+    await conformsToDocument(document, method, documented, response);
+  });
+
+  it("describes an imported standard", async () => {
+    const response = await at("/standards", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "ISO 9001",
+        edition: "2026",
+        requirements: [{ reference: "7.5.3", title: "Documented information" }],
+      }),
+    });
+
+    expect(response.status).toBe(201);
+    await conformsToDocument(document, "post", `${tenant}/standards`, response);
+  });
+
+  it("tells a client that the mapping tag versions the whole set, not the page", () => {
+    const list = document.paths[`${tenant}/controls/{controlId}/requirements`]!.get as {
+      responses: { "200": { headers: { ETag: { description: string } } } };
+    };
+
+    expect(list.responses["200"].headers.ETag.description).toMatch(/every page/);
+
+    const put = document.paths[`${tenant}/controls/{controlId}/requirements`]!.put as {
+      parameters: { name: string; description: string }[];
+    };
+    const ifMatch = put.parameters.find((parameter) => parameter.name === "If-Match");
+    expect(ifMatch?.description).toMatch(/every page/);
+    expect(ifMatch?.description).toContain("`*`");
+  });
+
+  it("describes a replaced mapping", async () => {
+    const response = await at(`/controls/${controlId}/requirements`, {
+      method: "PUT",
+      body: JSON.stringify({ requirementIds: [requirementId] }),
+    });
+
+    expect(response.status).toBe(200);
+    await conformsToDocument(
+      document,
+      "put",
+      `${tenant}/controls/{controlId}/requirements`,
+      response,
+    );
   });
 });

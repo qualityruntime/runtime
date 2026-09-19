@@ -16,6 +16,9 @@
  * back scoped anyway is the whole point.
  */
 
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { schema } from "@qualityruntime/db";
@@ -25,10 +28,15 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { Hono } from "hono";
 import { createApp } from "./app.ts";
+import { fileStoreOnDisk } from "./storage-on-disk.ts";
 import { type Auth, createAuth } from "./auth.ts";
 import { organizationContext, type OrganizationEnv } from "./organization.ts";
 
 const migrationsFolder = fileURLToPath(new URL("../../packages/db/migrations", import.meta.url));
+
+/** A store of its own, thrown away with the run. */
+const temporaryStore = async () =>
+  fileStoreOnDisk(await mkdtemp(join(tmpdir(), "qualityruntime-")));
 
 const createTestDatabase = (client: PGlite) => drizzle({ client, schema, casing: "snake_case" });
 
@@ -86,6 +94,7 @@ beforeAll(async () => {
   });
   app = createApp({
     db,
+    store: await temporaryStore(),
     auth,
   });
 

@@ -15,6 +15,9 @@
  * expectation with it rather than leaving a second list to update.
  */
 
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { schema } from "@qualityruntime/db";
@@ -24,11 +27,16 @@ import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { createApp } from "./app.ts";
+import { fileStoreOnDisk } from "./storage-on-disk.ts";
 import { type Auth, authOptions, createAuth } from "./auth.ts";
 
 const migrationsFolder = fileURLToPath(new URL("../../packages/db/migrations", import.meta.url));
 
 let db: ReturnType<typeof createTestDatabase>;
+
+/** A store of its own, thrown away with the run. */
+const temporaryStore = async () =>
+  fileStoreOnDisk(await mkdtemp(join(tmpdir(), "qualityruntime-")));
 
 const createTestDatabase = (client: PGlite) => drizzle({ client, schema, casing: "snake_case" });
 let auth: Auth;
@@ -41,7 +49,7 @@ beforeAll(async () => {
     baseURL: "http://localhost",
     secret: "test-secret-of-at-least-32-characters",
   });
-  app = createApp({ auth, db });
+  app = createApp({ auth, db, store: await temporaryStore() });
 }, 60_000);
 
 /** Drops the response attributes so the value is a valid `Cookie` request header. */

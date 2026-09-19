@@ -53,7 +53,7 @@ It is ambiguous **exactly where the policy governing the locking command restric
 
 Discarding a control is sound for a different reason. Its `DELETE` policy _does_ restrict which rows exist, but the row is locked first, so a delete matching nothing can only mean the predicate refused it — never that somebody else got there.
 
-**Not everything is covered.** Nothing yet covers connection exhaustion, a request cancelled mid-transaction, or two organizations contending for the same row — which cannot happen, since no row belongs to two.
+**Not everything is covered.** The upload test sends eight slow uploads through a two-connection pool to check that storage writes do not hold connections. This covers one source of pool exhaustion, not arbitrary overload. Request cancellation mid-transaction remains untested. Domain rows belong to one organization, so the suite does not model two tenants legitimately writing the same row.
 
 **CI runs it.** The `check` job takes a `postgres:18` service and sets `TEST_DATABASE_URL`, so a change that breaks a lock fails there rather than for whoever runs the suite next. That the setup works from nothing — no schema, no role, no rows — is checked by running it against a database created for the purpose, which is CI's situation exactly.
 

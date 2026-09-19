@@ -11,6 +11,9 @@
  * are in a deployment.
  */
 
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { schema, withOrganization } from "@qualityruntime/db";
@@ -20,8 +23,13 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { createApp } from "./app.ts";
 import { createAuth } from "./auth.ts";
+import { fileStoreOnDisk } from "./storage-on-disk.ts";
 
 const migrationsFolder = fileURLToPath(new URL("../../packages/db/migrations", import.meta.url));
+
+/** A store of its own, thrown away with the run. */
+const temporaryStore = async () =>
+  fileStoreOnDisk(await mkdtemp(join(tmpdir(), "qualityruntime-")));
 
 const createTestDatabase = (client: PGlite) => drizzle({ client, schema, casing: "snake_case" });
 
@@ -100,6 +108,7 @@ beforeAll(async () => {
   await migrate(db, { migrationsFolder });
   app = createApp({
     db,
+    store: await temporaryStore(),
     auth: createAuth(db, {
       baseURL: "http://localhost",
       secret: "test-secret-of-at-least-32-characters",

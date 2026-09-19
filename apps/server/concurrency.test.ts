@@ -18,6 +18,9 @@
  * whose name does not end in `_test`.
  */
 
+import { mkdtemp, readdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDatabase, schema, withOrganization } from "@qualityruntime/db";
 import { eq } from "drizzle-orm";
@@ -26,7 +29,10 @@ import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool, type PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import { createApp } from "./app.ts";
+import { maxFilesPerEvidence } from "./files.ts";
 import { createAuth } from "./auth.ts";
+import { fileStoreOnDisk } from "./storage-on-disk.ts";
+import type { FileStore } from "./storage.ts";
 
 const migrationsFolder = fileURLToPath(new URL("../../packages/db/migrations", import.meta.url));
 
@@ -82,6 +88,8 @@ let db: ReturnType<typeof createDatabase>;
 type Tenant = { cookie: string; organizationId: string };
 let acme: Tenant;
 let globex: Tenant;
+/** The volume the store writes to, so orphaned bytes can be counted. */
+let directory: string;
 
 const json = async <T>(response: Response): Promise<T> => (await response.json()) as T;
 type Request = Omit<RequestInit, "headers"> & { headers?: Record<string, string> };
@@ -160,6 +168,18 @@ async function holding<T>(
   }
 }
 
+/** Every file under `root`, as paths relative to it. */
+async function leaves(root: string, prefix = ""): Promise<string[]> {
+  const entries = await readdir(join(root, prefix), { withFileTypes: true });
+  const found: string[] = [];
+  for (const entry of entries) {
+    const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) found.push(...(await leaves(root, path)));
+    else found.push(path);
+  }
+  return found;
+}
+
 const control = async (name: string) => {
   const response = await request("/controls", {
     method: "POST",
@@ -199,9 +219,25 @@ const requirements = async (): Promise<[string, string]> => {
   return [rows[0]!.id, rows[1]!.id];
 };
 
+const evidenceFor = async (controlId: string, title: string) => {
+  const response = await request(`/controls/${controlId}/evidence`, {
+    method: "POST",
+    body: JSON.stringify({ title, occurredAt: "2026-07-01T09:00:00.000Z" }),
+  });
+  expect(response.status).toBe(201);
+  return (await json<{ data: { id: string } }>(response)).data.id;
+};
+
+const tagOf = async (path: string) => {
+  const response = await request(path);
+  expect(response.status).toBe(200);
+  return response.headers.get("etag")!;
+};
+
 beforeAll(async () => {
   if (!usable) return;
 
+  directory = await mkdtemp(join(tmpdir(), "qualityruntime-"));
   admin = new Pool({ connectionString });
 
   // One runner at a time. This file wipes the schema it works in, so a second
@@ -239,6 +275,7 @@ beforeAll(async () => {
   db = createDatabase(pool);
   app = createApp({
     db,
+    store: fileStoreOnDisk(directory),
     auth: createAuth(db, {
       baseURL: "http://localhost",
       secret: "test-secret-of-at-least-32-characters",
@@ -338,49 +375,278 @@ describe.skipIf(!usable)("what a lock actually prevents", () => {
     expect((await json<{ data: { status: string } }>(response)).data.status).toBe("retired");
   });
 
-  it("lets two amendments through in turn, and records what each replaced", async () => {
-    // Serialised rather than refused: neither names a version, so neither is
-    // asking to be protected. What must not happen is an audit event claiming
-    // to have replaced something it did not — the second amendment's `before`
-    // has to be what the first wrote, not what it read before the first ran.
-    //
-    // `Promise.all` alone would not force that: it starts both requests, it
-    // does not make their reads overlap. Both have to be waiting on the same
-    // lock before either is let go.
-    const id = await control("Original");
+  it("refuses a conditional discard of evidence amended while it waited", async () => {
+    // The race that shipped. The tag was compared against an unlocked read, so
+    // the amendment below landed between the comparison and the delete and the
+    // evidence went anyway — with the caller none the wiser.
+    const id = await control("For the evidence");
+    const evidenceId = await evidenceFor(id, "Read, then amended");
+    const read = await tagOf(`/evidence/${evidenceId}`);
 
-    const [first, second] = await holding(
-      `select * from "control" where "id" = $1 for update`,
-      [id],
+    const response = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
       async ({ session, blocked }) => {
-        const both = Promise.all([
-          request(`/controls/${id}`, {
-            method: "PATCH",
-            body: JSON.stringify({ name: "One" }),
-          }),
-          request(`/controls/${id}`, {
-            method: "PATCH",
-            body: JSON.stringify({ name: "Two" }),
-          }),
+        const discarding = request(`/evidence/${evidenceId}`, {
+          method: "DELETE",
+          headers: { "if-match": read },
+        });
+        await blocked();
+        await session.query(`update "evidence" set "title" = 'Amended' where "id" = $1`, [
+          evidenceId,
         ]);
-        await blocked(2);
         await session.query("commit");
-        return both;
+        return discarding;
       },
     );
 
-    expect([first.status, second.status]).toEqual([200, 200]);
-    const { data } = await json<{ data: { action: string; before: { name?: string } | null }[] }>(
-      await request(`/history?resource=${id}`),
+    expect(response.status).toBe(412);
+    // And the evidence is still there, carrying the amendment.
+    const { data } = await json<{ data: { title: string } }>(
+      await request(`/evidence/${evidenceId}`),
     );
-    const replaced = data
-      .filter((event) => event.action === "updated")
-      .map((event) => event.before?.name);
+    expect(data.title).toBe("Amended");
+  });
 
-    expect(replaced).toHaveLength(2);
-    // One replaced the original; the other replaced whatever the first wrote.
-    expect(replaced).toContain("Original");
-    expect(new Set(replaced).size).toBe(2);
+  it("refuses a conditional amendment of evidence amended while it waited", async () => {
+    const id = await control("For the other amendment");
+    const evidenceId = await evidenceFor(id, "Also read first");
+    const read = await tagOf(`/evidence/${evidenceId}`);
+
+    const response = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
+      async ({ session, blocked }) => {
+        const amending = request(`/evidence/${evidenceId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ title: "Mine" }),
+          headers: { "if-match": read },
+        });
+        await blocked();
+        await session.query(`update "evidence" set "title" = 'Theirs' where "id" = $1`, [
+          evidenceId,
+        ]);
+        await session.query("commit");
+        return amending;
+      },
+    );
+
+    expect(response.status).toBe(412);
+    const { data } = await json<{ data: { title: string } }>(
+      await request(`/evidence/${evidenceId}`),
+    );
+    expect(data.title).toBe("Theirs");
+  });
+
+  it("refuses an attestation of evidence amended while it waited", async () => {
+    // Attesting never locks — an attested row cannot be — so it repeats the
+    // version in its `WHERE` instead. This is what that repetition is for.
+    const id = await control("For the signature");
+    const evidenceId = await evidenceFor(id, "About to be signed");
+    const read = await tagOf(`/evidence/${evidenceId}`);
+
+    const response = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
+      async ({ session, blocked }) => {
+        const attesting = request(`/evidence/${evidenceId}/attestation`, {
+          method: "PUT",
+          headers: { "if-match": read },
+        });
+        await blocked();
+        await session.query(`update "evidence" set "title" = 'Changed first' where "id" = $1`, [
+          evidenceId,
+        ]);
+        await session.query("commit");
+        return attesting;
+      },
+    );
+
+    expect(response.status).toBe(412);
+    const { data } = await json<{ data: { attestation: unknown } }>(
+      await request(`/evidence/${evidenceId}`),
+    );
+    expect(data.attestation).toBeNull();
+  });
+
+  it.each([
+    ["the discard", "discard"],
+    ["the recording", "record"],
+  ])(
+    "never both discards a control and records evidence against it, %s first",
+    async (_case, first) => {
+      // ADR 0013 argued this from lock conflicts and never showed it: recording
+      // evidence needs `for key share` on its control for the foreign key check,
+      // which conflicts with the `for update` a discard holds. So the two cannot
+      // interleave — and whichever loses must lose *cleanly*, not with a foreign
+      // key violation surfacing as a 500.
+      //
+      // Both orders, and each forced: a lock queue is first-come, so starting one
+      // request and waiting for it to join the queue before starting the other
+      // decides which wins. Leaving it to chance would make this pass whenever
+      // the order happened to be the harmless one.
+      const id = await control(`Contested ${first}`);
+      const discard = () => request(`/controls/${id}`, { method: "DELETE" });
+      const record = () =>
+        request(`/controls/${id}/evidence`, {
+          method: "POST",
+          body: JSON.stringify({ title: "Racing", occurredAt: "2026-07-01T09:00:00.000Z" }),
+        });
+
+      const [discarded, recorded] = await holding(
+        `select * from "control" where "id" = $1 for update`,
+        [id],
+        async ({ session, blocked }) => {
+          const ahead = first === "discard" ? discard() : record();
+          await blocked(1);
+          const behind = first === "discard" ? record() : discard();
+          await blocked(2);
+          await session.query("commit");
+          const settled = await Promise.all([ahead, behind]);
+          return first === "discard" ? settled : [settled[1]!, settled[0]!];
+        },
+      );
+
+      // Neither is a server error, whichever went first.
+      expect(discarded.status).not.toBe(500);
+      expect(recorded.status).not.toBe(500);
+
+      const gone = (await request(`/controls/${id}`)).status === 404;
+      if (first === "discard") {
+        // The discard was ahead, so it took the control and the recording found
+        // nothing to record against.
+        expect(discarded.status).toBe(204);
+        expect(gone).toBe(true);
+        expect(recorded.status).toBe(404);
+      } else {
+        // The recording was ahead, so the control now carries evidence and may
+        // not be discarded at all.
+        expect(recorded.status).toBe(201);
+        expect(gone).toBe(false);
+        expect(discarded.status).toBe(409);
+        expect((await json<{ error: { code: string } }>(discarded)).error.code).toBe(
+          "has_evidence",
+        );
+      }
+    },
+  );
+
+  it.each([
+    ["the discard", "discard"],
+    ["the attachment", "attach"],
+  ])("never both discards evidence and attaches a file to it, %s first", async (_case, first) => {
+    // The same shape one level down: a file references its evidence, so the
+    // insert needs `for key share` on it, and a discard holds `for update`.
+    const id = await control(`Contested attachment ${first}`);
+    const evidenceId = await evidenceFor(id, "Gaining or losing a file");
+    const discard = () => request(`/evidence/${evidenceId}`, { method: "DELETE" });
+    const attach = () =>
+      request(`/evidence/${evidenceId}/files?filename=racing.txt`, {
+        method: "POST",
+        body: "bytes that may have nowhere to go",
+      });
+
+    const before = (await leaves(directory)).length;
+    const [discarded, attached] = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
+      async ({ session, blocked }) => {
+        const ahead = first === "discard" ? discard() : attach();
+        await blocked(1);
+        const behind = first === "discard" ? attach() : discard();
+        await blocked(2);
+        await session.query("commit");
+        const settled = await Promise.all([ahead, behind]);
+        return first === "discard" ? settled : [settled[1]!, settled[0]!];
+      },
+    );
+
+    expect(discarded.status).not.toBe(500);
+    expect(attached.status).not.toBe(500);
+
+    const survives = (await request(`/evidence/${evidenceId}`)).status === 200;
+    if (first === "discard") {
+      // The evidence went, so there was nothing left to attach to.
+      expect(discarded.status).toBe(204);
+      expect(survives).toBe(false);
+      expect(attached.status).not.toBe(201);
+      // The bytes were written before the row was attempted, and the row never
+      // landed — so they have to go. Nothing sweeps the volume (ADR 0013), and
+      // an orphan here would be invisible to everything but `verify:files`.
+      expect(await leaves(directory)).toHaveLength(before);
+    } else {
+      // The file landed first; discarding evidence takes its files with it,
+      // which is the documented cascade rather than a race (ADR 0013).
+      expect(attached.status).toBe(201);
+      expect(discarded.status).toBe(204);
+      expect(survives).toBe(false);
+      // The file row went with its evidence, and its bytes stayed: a foreign
+      // key cannot reach a filesystem, which ADR 0013 records as the reason a
+      // sweeper is still owed.
+      expect(await leaves(directory)).toHaveLength(before + 1);
+    }
+  });
+
+  it("says attested, not missing, when evidence is signed while a file is uploading", async () => {
+    // A locked read is governed by the UPDATE policy, which sees only
+    // unattested rows. So evidence attested while the bytes were being written
+    // is not there to lock — and without a second, unlocked read that arrives
+    // as 404 rather than 409, telling a caller the evidence never existed.
+    const id = await control("Signed mid-upload");
+    const evidenceId = await evidenceFor(id, "About to be signed");
+    const { rows } = await admin.query<{ id: string }>('select "id" from "user" limit 1');
+    const signer = rows[0]!.id;
+
+    const response = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
+      async ({ session, blocked }) => {
+        const attaching = request(`/evidence/${evidenceId}/files?filename=late.txt`, {
+          method: "POST",
+          body: "bytes arriving just too late",
+        });
+        await blocked(1);
+        await session.query(
+          `update "evidence" set "attested_at" = now(), "attested_by_id" = $2,
+             "attested_by_label" = 'Ada' where "id" = $1`,
+          [evidenceId, signer],
+        );
+        await session.query("commit");
+        return attaching;
+      },
+    );
+
+    expect(response.status).toBe(409);
+    expect((await json<{ error: { code: string } }>(response)).error.code).toBe("already_attested");
+  });
+
+  it("removes the bytes when the transaction fails rather than refuses", async () => {
+    // The losing paths above all *return* an outcome. This is the other branch:
+    // the transaction throws, and the bytes written before it must still go.
+    // Forced by taking away the privilege the audit write needs, mid-flight.
+    const id = await control("Failing mid-transaction");
+    const evidenceId = await evidenceFor(id, "Its audit write will fail");
+    const before = (await leaves(directory)).length;
+
+    let response: Response;
+    try {
+      await admin.query(`revoke insert on "audit_event" from ${runtime}`);
+      response = await request(`/evidence/${evidenceId}/files?filename=doomed.txt`, {
+        method: "POST",
+        body: "bytes with nowhere to go",
+      });
+    } finally {
+      await admin.query(`grant insert on "audit_event" to ${runtime}`);
+    }
+
+    expect(response.status).toBe(500);
+    // Rolled back, so no row — and no bytes left behind either.
+    expect((await request(`/evidence/${evidenceId}`)).status).toBe(200);
+    const { data } = await json<{ data: { files: unknown[] } }>(
+      await request(`/evidence/${evidenceId}`),
+    );
+    expect(data.files).toEqual([]);
+    expect(await leaves(directory)).toHaveLength(before);
   });
 
   it("refuses a conditional remapping of a control remapped while it waited", async () => {
@@ -501,6 +767,193 @@ describe.skipIf(!usable)("what a lock actually prevents", () => {
     if (expected === "same") expect(after).toEqual(before);
     else expect(after).toHaveLength(1);
   });
+
+  it("refuses an attachment when evidence is attested beside it", async () => {
+    // A test alone cannot decide this: under `read committed` it sees the
+    // committed draft while an attestation sits uncommitted in another
+    // transaction, and the `for key share` an insert's foreign key takes does
+    // not conflict with that `update`. Both would commit, and what was signed
+    // gains an attachment afterwards — which ADR 0012 says cannot happen.
+    //
+    // Driven at the SQL level, as the runtime role, with no lock of the
+    // inserter's own: the guarantee is `file_evidence_open`'s, so it has to
+    // hold for an insert path that remembers nothing.
+    const id = await control("Signed while gaining a file");
+    const evidenceId = await evidenceFor(id, "About to be signed");
+    const { rows: users } = await admin.query<{ id: string }>('select "id" from "user" limit 1');
+    const signer = users[0]!.id;
+
+    const attesting = await pool.connect();
+    const attaching = await pool.connect();
+    try {
+      await attesting.query("begin");
+      await attesting.query("select set_config('qualityruntime.organization_id', $1, true)", [
+        acme.organizationId,
+      ]);
+      // The signature, not yet committed.
+      await attesting.query(
+        `update "evidence" set "attested_at" = now(), "attested_by_id" = $2,
+         "attested_by_label" = 'Ada' where "id" = $1`,
+        [evidenceId, signer],
+      );
+
+      await attaching.query("begin");
+      await attaching.query("select set_config('qualityruntime.organization_id', $1, true)", [
+        acme.organizationId,
+      ]);
+      const { rows: backend } = await attaching.query<{ pid: number }>(
+        "select pg_backend_pid() as pid",
+      );
+      const landing = attaching
+        .query(
+          `insert into "file" ("id", "organization_id", "evidence_id", "filename",
+           "content_type", "bytes", "checksum")
+           values ($1, $2, $3, 'racing.txt', 'text/plain', 5, $4)`,
+          [`fil_${"0".repeat(16)}`, acme.organizationId, evidenceId, "a".repeat(64)],
+        )
+        .then(
+          () => "attached",
+          (error: { code?: string }) => error.code,
+        );
+
+      // Waiting on the trigger's lock, not merely slow: only then is the order
+      // of the two commits what this test says it is.
+      for (let attempt = 0; ; attempt++) {
+        const { rows } = await admin.query<{ blocked: boolean }>(
+          "select cardinality(pg_blocking_pids($1)) > 0 as blocked",
+          [backend[0]!.pid],
+        );
+        if (rows[0]?.blocked) break;
+        if (attempt === 1500) throw new Error("the attachment never waited for the signature");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await attesting.query("commit");
+
+      expect(await landing).toBe("23001");
+    } finally {
+      for (const session of [attesting, attaching]) {
+        await session.query("rollback").catch(() => undefined);
+        session.release();
+      }
+    }
+
+    const { rows: attached } = await admin.query<{ count: number }>(
+      'select count(*)::int as count from "file" where "evidence_id" = $1',
+      [evidenceId],
+    );
+    expect(attached[0]?.count).toBe(0);
+  });
+
+  it.each([
+    ["amending", "PATCH"],
+    ["discarding", "DELETE"],
+  ])("says gone, not signed, when evidence is discarded while %s it", async (_case, method) => {
+    // A locked read is governed by the UPDATE policy, so an empty result means
+    // the row is attested — or that it was deleted while this transaction
+    // waited for the lock. The two are indistinguishable from the lock alone,
+    // and answering "already attested" for something discarded and never
+    // signed is a confident wrong answer.
+    const id = await control(`Discarded while ${method}`);
+    const evidenceId = await evidenceFor(id, "About to be discarded");
+
+    const response = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
+      async ({ session, blocked }) => {
+        const attempt = request(`/evidence/${evidenceId}`, {
+          method,
+          ...(method === "PATCH" ? { body: JSON.stringify({ title: "Mine" }) } : {}),
+        });
+        await blocked();
+        await session.query('delete from "file" where "evidence_id" = $1', [evidenceId]);
+        await session.query('delete from "evidence" where "id" = $1', [evidenceId]);
+        await session.query("commit");
+        return attempt;
+      },
+    );
+
+    expect(response.status).toBe(404);
+    expect((await json<{ error: { code: string } }>(response)).error.code).toBe("not_found");
+  });
+
+  it("holds the file limit when uploads arrive together", async () => {
+    // The limit is counted by the handler, and nothing in the schema enforces
+    // it — which used to mean two uploads racing could leave an evidence
+    // carrying one file too many. The lock the attach now takes to exclude an
+    // attestation also excludes another attach, so the count is decided once.
+    // Asserted rather than assumed: this is the kind of claim that has been
+    // wrong before (ADR 0013, ADR 0020).
+    const id = await control("Filling up");
+    const evidenceId = await evidenceFor(id, "At the limit");
+
+    const upload = (which: number) =>
+      request(`/evidence/${evidenceId}/files?filename=file-${which}.txt`, {
+        method: "POST",
+        body: `bytes ${which}`,
+      });
+
+    // Two past the limit, all at once.
+    const attempts = await Promise.all(
+      Array.from({ length: maxFilesPerEvidence + 2 }, async (_, which) => upload(which)),
+    );
+
+    const accepted = attempts.filter((response) => response.status === 201).length;
+    const refused = attempts.filter((response) => response.status === 409).length;
+    expect(accepted).toBe(maxFilesPerEvidence);
+    expect(refused).toBe(2);
+
+    const { rows } = await admin.query<{ count: number }>(
+      'select count(*)::int as count from "file" where "evidence_id" = $1',
+      [evidenceId],
+    );
+    expect(rows[0]?.count).toBe(maxFilesPerEvidence);
+  }, 60_000);
+
+  it("lets two amendments through in turn, and records what each replaced", async () => {
+    // Serialised rather than refused: neither names a version, so neither is
+    // asking to be protected. What must not happen is an audit event claiming
+    // to have replaced something it did not — the second amendment's `before`
+    // has to be what the first wrote, not what it read before the first ran.
+    //
+    // `Promise.all` alone would not force that: it starts both requests, it
+    // does not make their reads overlap. Both have to be waiting on the same
+    // lock before either is let go.
+    const id = await control("Amended twice");
+    const evidenceId = await evidenceFor(id, "Original");
+
+    const [first, second] = await holding(
+      `select * from "evidence" where "id" = $1 for update`,
+      [evidenceId],
+      async ({ session, blocked }) => {
+        const both = Promise.all([
+          request(`/evidence/${evidenceId}`, {
+            method: "PATCH",
+            body: JSON.stringify({ title: "One" }),
+          }),
+          request(`/evidence/${evidenceId}`, {
+            method: "PATCH",
+            body: JSON.stringify({ title: "Two" }),
+          }),
+        ]);
+        await blocked(2);
+        await session.query("commit");
+        return both;
+      },
+    );
+
+    expect([first.status, second.status]).toEqual([200, 200]);
+    const { data } = await json<{ data: { action: string; before: { title?: string } | null }[] }>(
+      await request(`/history?resource=${evidenceId}`),
+    );
+    const replaced = data
+      .filter((event) => event.action === "updated")
+      .map((event) => event.before?.title);
+
+    expect(replaced).toHaveLength(2);
+    // One replaced the original; the other replaced whatever the first wrote.
+    expect(replaced).toContain("Original");
+    expect(new Set(replaced).size).toBe(2);
+  });
 });
 
 describe.skipIf(!usable)("tenants sharing a connection pool", () => {
@@ -574,4 +1027,79 @@ describe.skipIf(!usable)("tenants sharing a connection pool", () => {
       for (const connection of held) connection.release();
     }
   });
+});
+
+describe.skipIf(!usable)("holding a connection while doing something slow", () => {
+  /**
+   * The same store, but writing takes its time.
+   *
+   * Streaming a file to disk is the slowest thing any handler does. If a
+   * connection were held across it, a deployment would run out of connections
+   * under a handful of concurrent uploads — and nothing would fail until it
+   * did, which is the worst way to find out.
+   */
+  const unhurried = (slow: number): FileStore => {
+    const underneath = fileStoreOnDisk(directory);
+    return {
+      ...underneath,
+      put: async (key, body, limit) => {
+        await new Promise((resolve) => setTimeout(resolve, slow));
+        return underneath.put(key, body, limit);
+      },
+    };
+  };
+
+  it("uploads more files at once than there are connections", async () => {
+    // Two connections, eight uploads, each spending longer writing bytes than a
+    // connection may be waited for. It passes only because no connection is
+    // held while the bytes are written: put anything slow inside the
+    // transaction and uploads start failing to get a connection at all.
+    //
+    // Which ones fail depends on scheduling, so the assertion is that none
+    // does. The wait must stay under two rounds of work: were the bytes
+    // written inside the transaction, eight uploads on two connections would
+    // run four rounds, and the third would wait 2000ms. Everything above one
+    // round is headroom for the short transactions to queue through two
+    // connections — they serialize on the evidence lock, and a 500ms wait
+    // against 400ms of work once ran out under a loaded full suite.
+    const cramped = new Pool({
+      connectionString,
+      max: 2,
+      connectionTimeoutMillis: 1800,
+      options: `-c role=${runtime}`,
+    });
+    try {
+      const constrained = createApp({
+        db: createDatabase(cramped),
+        store: unhurried(1000),
+        auth: createAuth(createDatabase(cramped), {
+          baseURL: "http://localhost",
+          secret: "test-secret-of-at-least-32-characters",
+        }),
+      });
+
+      const id = await control("Uploaded to at length");
+      const evidenceId = await evidenceFor(id, "Eight files at once");
+
+      const uploads = await Promise.all(
+        Array.from({ length: 8 }, async (_, which) =>
+          constrained.request(
+            `/api/v1/organizations/${acme.organizationId}/evidence/${evidenceId}/files?filename=slow-${which}.txt`,
+            { method: "POST", headers: { cookie: acme.cookie }, body: `bytes ${which}` },
+          ),
+        ),
+      );
+
+      // A refusal carries its body, so a failure here names the error — a pool
+      // timeout, or something else — rather than only that there was one.
+      const outcomes = await Promise.all(
+        uploads.map(async (response) =>
+          response.status === 201 ? 201 : `${response.status} ${await response.text()}`,
+        ),
+      );
+      expect(outcomes).toEqual(Array(8).fill(201));
+    } finally {
+      await cramped.end();
+    }
+  }, 60_000);
 });

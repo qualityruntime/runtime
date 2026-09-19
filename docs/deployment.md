@@ -6,15 +6,30 @@ No deployment target is supported yet. Docker is the canonical self-hosted targe
 
 ## What a deployment provides
 
-Quality Runtime needs PostgreSQL, and nothing else:
+Quality Runtime needs PostgreSQL and a directory it can write to, and nothing else:
 
 | Setting              | Holds                                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------- |
 | `DATABASE_URL`       | The database, as a role that owns nothing and has neither `SUPERUSER` nor `BYPASSRLS` |
+| `STORAGE_DIRECTORY`  | Where uploaded files are kept                                                         |
 | `BETTER_AUTH_URL`    | The public origin the server is reached at                                            |
 | `BETTER_AUTH_SECRET` | At least 32 high-entropy characters                                                   |
 
 The server refuses to start without any of them. `MIGRATION_DATABASE_URL` is not one: migrations are a separate step with a role of their own, described under [Applying migrations](#applying-migrations).
+
+`STORAGE_DIRECTORY` must be on durable storage that outlives the process — a mounted volume, not a container's own filesystem and not `/tmp` ([ADR 0013](adr/0013-durable-storage.md)). PostgreSQL remains the authority on what a file is and who may read it; the directory holds only bytes, named by identifiers the database issued.
+
+Back it up with the database, and at the same time. A file whose row is gone is unreachable; a row whose file is gone is a broken download — and for attested evidence, a record that has lost the thing it was evidence of. Nothing reconciles the two, so a restore that mixes eras leaves work for a person.
+
+**Keeping records is the operator's job.** Quality Runtime does not expire evidence or enforce a retention schedule of its own. Attestation stops the application changing a record; it does not stop an organization being removed or a volume being lost. So a deployment that must keep records for a period — the CRA, for one, has a manufacturer keep technical documentation for ten years after the product is placed on the market, or for its support period if longer (Art. 13(13)) — has to keep them, attachments included, for that long. Take a copy before removing an organization whose records must stay available; backups taken afterwards do not hold it. A backup never restored is an assumption. Restore one now and then, and point the check below at the restored copy, connecting as a role like the server's — it refuses one that bypasses row-level security:
+
+```sh
+DATABASE_URL=… STORAGE_DIRECTORY=… bun run verify:files
+```
+
+It checks only the files the restored rows name. On a database with none it says nothing was checked rather than that everything matched, but a restore missing some records passes all the same, so confirm that the records you expect are there, too.
+
+Discarding evidence takes its `file` rows by cascade and leaves the bytes on the volume. The upload handler removes bytes when an upload fails or its metadata cannot be committed, but there is no garbage collector for previously attached files. Storage therefore grows with successful uploads even when their evidence is later discarded. `bun run verify:files` walks rows and cannot see bytes no row claims ([ADR 0013](adr/0013-durable-storage.md)).
 
 ## Database role
 
@@ -75,7 +90,7 @@ Then, once the tables exist, take back what no policy would ever allow anyway:
 
 ```sql
 REVOKE UPDATE, DELETE ON "audit_event"          FROM qualityruntime;  -- append-only (ADR 0005)
-REVOKE UPDATE, DELETE ON "file"                 FROM qualityruntime;  -- attached for good
+REVOKE UPDATE, DELETE ON "file"                 FROM qualityruntime;  -- attached for good (ADR 0013)
 REVOKE UPDATE         ON "control_requirement"  FROM qualityruntime;  -- a link is made or unmade (ADR 0010)
 REVOKE DELETE         ON "organization"         FROM qualityruntime;  -- see below
 ```
@@ -93,6 +108,18 @@ Nothing else is granted: the server holds no `TRUNCATE`, owns no table, and cann
 Two things it does not establish. It reaches the roles with `SET ROLE` on one session rather than by connecting, so `LOGIN` is checked as an attribute, while passwords and actual login are not tested. And the one-off grant for an existing database is not executed, because on the fresh database the test builds it would do nothing — which is exactly why it is not in a block.
 
 What survives are PostgreSQL's own defaults, which neither block revokes: the role can create temporary tables, and it can create large objects, which sit outside row-level security entirely. Nothing here uses either. `REVOKE TEMP ON DATABASE … FROM PUBLIC` takes away the first; it does not touch the second, for which PostgreSQL offers no privilege to revoke — `lo_compat_privileges` and the large object's own ownership are the only levers, and neither is worth pulling for a feature nothing uses.
+
+## Checking stored files
+
+```sh
+bun run verify:files
+```
+
+Reads every file recorded in PostgreSQL, recomputes its checksum, and reports altered, missing, or unreadable files. Unreferenced bytes on disk are not checked. Exits non-zero when it finds something, so a scheduled run does not need its output read — except to notice a run that found no files to check, which exits zero, because a new deployment holds none.
+
+It reads every referenced file in full, so schedule it according to storage size and workload. Investigate findings before restoring: a checksum mismatch indicates changed bytes, while missing or unreadable files can also indicate an incorrect `STORAGE_DIRECTORY`, an unmounted volume, or access problems ([ADR 0016](adr/0016-verifying-stored-bytes.md)).
+
+Nothing records findings anywhere durable yet. Keep the output.
 
 ## The API reference
 

@@ -6,8 +6,10 @@
  *
  * Two people editing one record is otherwise last-writer-wins, and the loser
  * never learns. A caller that read a record can name the version it read and be
- * refused if it has moved since (ADR 0019). Optional: a caller that does not
- * ask gets the write regardless.
+ * refused if it has moved since (ADR 0019).
+ *
+ * Optional everywhere except attesting, which is a signature and has to be of
+ * something in particular ([ADR 0012](../../docs/adr/0012-evidence-and-attestation.md)).
  */
 
 import { createHash } from "node:crypto";

@@ -440,20 +440,6 @@ async function tenantWithControls(names: string[]) {
   return tenant;
 }
 
-/**
- * Evidence against a control, written as the tenant. No route records evidence
- * yet, but the table and the foreign key restricting a control's deletion do.
- */
-const recordEvidence = (controlId: string) =>
-  withOrganization(db, acme.organizationId, (tx) =>
-    tx.insert(schema.evidence).values({
-      organizationId: acme.organizationId,
-      controlId,
-      title: "Minutes",
-      occurredAt: new Date("2026-07-01T09:00:00.000Z"),
-    }),
-  );
-
 describe("discarding a draft", () => {
   it("says what to do instead of reviving a retired control", async () => {
     // Retired is final, so a retired control never becomes a draft that could
@@ -672,14 +658,22 @@ describe("discarding a draft", () => {
 
   it("refuses a draft that carries evidence, rather than failing on a foreign key", async () => {
     const created = await given(acme, { name: "Has evidence" });
-    await recordEvidence(created.id);
+    const recorded = await app.request(
+      `/api/v1/organizations/${acme.organizationId}/controls/${created.id}/evidence`,
+      {
+        method: "POST",
+        headers: { cookie: acme.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ title: "Minutes", occurredAt: "2026-07-01T09:00:00.000Z" }),
+      },
+    );
+    expect(recorded.status).toBe(201);
 
     const response = await discard(acme, created.id);
 
     expect(response.status).toBe(409);
     const { error } = await json<Failure>(response);
     expect(error.code).toBe("has_evidence");
-    expect(error.details?.[0]?.message).toContain("cannot be discarded");
+    expect(error.details?.[0]?.message).toContain("Discard its evidence first");
     expect((await request(acme, `/${created.id}`)).status).toBe(200);
   });
 
@@ -804,7 +798,15 @@ describe("changing only what you read", () => {
     if (code === "was_in_effect") {
       expect((await patchWith(created.id, undefined, { status: "active" })).status).toBe(200);
     } else {
-      await recordEvidence(created.id);
+      const recorded = await app.request(
+        `/api/v1/organizations/${acme.organizationId}/controls/${created.id}/evidence`,
+        {
+          method: "POST",
+          headers: { cookie: acme.cookie, "content-type": "application/json" },
+          body: JSON.stringify({ title: "Attached", occurredAt: "2026-07-01T09:00:00.000Z" }),
+        },
+      );
+      expect(recorded.status).toBe(201);
     }
 
     const stale = await request(acme, `/${created.id}`, {

@@ -24,6 +24,13 @@ import {
   updateBody,
 } from "./controls.ts";
 import { collectionQuery } from "./pagination.ts";
+import {
+  evidenceAmendBody,
+  evidenceBody,
+  evidenceOrder,
+  evidenceResponse,
+  requirementEvidenceOrder,
+} from "./evidence.ts";
 import { requirementControlsOrder, requirementResponse } from "./requirements.ts";
 import {
   importBody,
@@ -106,6 +113,7 @@ const pathParameterTypes: Record<string, IdType> = {
   controlId: "control",
   standardId: "standard",
   requirementId: "requirement",
+  evidenceId: "evidence",
 };
 
 /** Derived from the path itself, so a parameter cannot be left undescribed. */
@@ -122,7 +130,11 @@ function pathParameters(path: string) {
   });
 }
 
-/** `If-Match` where it is optional: supplied, the write is conditional on it (ADR 0019). */
+/**
+ * `If-Match` where it is optional: supplied, the write is conditional on it.
+ *
+ * Attesting names its own, because there it is required (ADR 0019).
+ */
 const conditional = {
   name: "If-Match",
   in: "header",
@@ -310,6 +322,96 @@ const operations: Operation[] = [
   },
   {
     method: "get",
+    path: `${controls}/{controlId}/evidence`,
+    summary: "List a control's evidence, most recently occurred first.",
+    // Any control: the published schema is the same whichever it is.
+    query: collectionQuery(evidenceOrder("{controlId}")),
+    responses: {
+      "200": responds("A page of evidence.", collection(evidenceResponse)),
+      "400": fails("The query is not valid."),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such control."),
+    },
+  },
+  {
+    method: "post",
+    path: `${controls}/{controlId}/evidence`,
+    summary: "Record evidence for a control. It starts unattested.",
+    request: evidenceBody,
+    responses: {
+      "201": versioned("The evidence that was recorded.", single(evidenceResponse)),
+      "400": fails("The body is not valid."),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such control."),
+      "413": fails("The body is too large."),
+    },
+  },
+  {
+    method: "get",
+    path: `${tenant}/evidence/{evidenceId}`,
+    summary: "Retrieve one piece of evidence.",
+    responses: {
+      "200": versioned("The evidence.", single(evidenceResponse)),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such evidence."),
+    },
+  },
+  {
+    method: "patch",
+    path: `${tenant}/evidence/{evidenceId}`,
+    summary: "Change evidence that has not been attested.",
+    parameters: [conditional],
+    request: evidenceAmendBody,
+    responses: {
+      "200": versioned("The evidence as it now stands.", single(evidenceResponse)),
+      "400": fails("The body is not valid."),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such evidence."),
+      "409": fails("The evidence is attested, and attested evidence does not change."),
+      "413": fails("The body is too large."),
+      "412": fails("If-Match does not match the evidence's current ETag."),
+    },
+  },
+  {
+    method: "delete",
+    path: `${tenant}/evidence/{evidenceId}`,
+    summary: "Discard unattested evidence.",
+    parameters: [conditional],
+    responses: {
+      "204": { description: "The evidence is gone." },
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such evidence."),
+      "409": fails("The evidence is attested, and what was attested is kept."),
+      "412": fails("If-Match does not match the evidence's current ETag."),
+    },
+  },
+  {
+    method: "put",
+    path: `${tenant}/evidence/{evidenceId}/attestation`,
+    summary: "Attest evidence, vouching for it. It cannot be changed afterwards.",
+    parameters: [
+      {
+        name: "If-Match",
+        in: "header",
+        required: true,
+        description:
+          "The exact strong ETag of the evidence as it was read. Wildcards (`*`), lists and " +
+          "weak tags are refused: an attestation endorses that specific version.",
+        schema: { type: "string" },
+      },
+    ],
+    responses: {
+      "200": responds("The evidence, now attested.", single(evidenceResponse)),
+      "401": fails("The request is not authenticated."),
+      "403": fails("Attesting is refused while impersonating."),
+      "404": fails("No such evidence."),
+      "409": fails("The evidence has already been attested."),
+      "412": fails("If-Match does not match the evidence's current ETag."),
+      "428": fails("If-Match is required."),
+    },
+  },
+  {
+    method: "get",
     path: `${tenant}/requirements/{requirementId}`,
     summary: "Retrieve one requirement, without going through its standard.",
     responses: {
@@ -326,6 +428,21 @@ const operations: Operation[] = [
     query: collectionQuery(requirementControlsOrder("{requirementId}")),
     responses: {
       "200": responds("A page of controls.", collection(controlResponse)),
+      "400": fails("The query is not valid."),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such requirement."),
+    },
+  },
+  {
+    method: "get",
+    path: `${tenant}/requirements/{requirementId}/evidence`,
+    summary:
+      "List the evidence recorded for the controls mapped to a requirement, most recently " +
+      "occurred first. A mapping is not a claim of coverage.",
+    // Any requirement: the published schema is the same whichever it is.
+    query: collectionQuery(requirementEvidenceOrder("{requirementId}")),
+    responses: {
+      "200": responds("A page of evidence.", collection(evidenceResponse)),
       "400": fails("The query is not valid."),
       "401": fails("The request is not authenticated."),
       "404": fails("No such requirement."),

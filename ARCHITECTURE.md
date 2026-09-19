@@ -235,6 +235,8 @@ Changes made by a domain mutation request are audited. What a _foreign key_ does
 **VERSION-01 — Historical state is preserved where required**
 Controlled or finalized records must not silently lose historical state.
 
+"Silently" is load-bearing, and the qualifications are deliberate. Attested evidence cannot be changed or removed by the application at all ([ADR 0012](docs/adr/0012-evidence-and-attestation.md)). A record that never claimed anything is not controlled and may be discarded outright — a draft control, for one ([ADR 0017](docs/adr/0017-discarding-a-draft-control.md)). And removing a tenant removes its history, which is why that is an operator's act with a credential the server does not hold ([ADR 0014](docs/adr/0014-the-runtime-role-owns-nothing.md)) rather than something the API offers.
+
 **EXT-01 — Extensions add rather than patch**
 Customization prefers explicit composition points over modifications to core implementation.
 

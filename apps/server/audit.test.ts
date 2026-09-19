@@ -506,6 +506,26 @@ describe("reading an organization's history", () => {
     expect(data.every((event) => event.resourceId === control.id)).toBe(true);
   });
 
+  it("includes control and evidence events in the same history", async () => {
+    const control = await given(acme, { name: "With evidence" });
+    const recorded = await app.request(
+      `/api/v1/organizations/${acme.organizationId}/controls/${control.id}/evidence`,
+      {
+        method: "POST",
+        headers: { cookie: acme.cookie, "content-type": "application/json" },
+        body: JSON.stringify({ title: "Minutes", occurredAt: "2026-07-01T09:00:00.000Z" }),
+      },
+    );
+    expect(recorded.status).toBe(201);
+    const evidenceId = (await json<{ data: { id: string } }>(recorded)).data.id;
+
+    const { data } = await readHistory(acme);
+
+    expect(data.some((event) => event.resourceId === control.id)).toBe(true);
+    const theirs = data.find((event) => event.resourceId === evidenceId);
+    expect(theirs?.resourceType).toBe("evidence");
+  });
+
   it("narrows to one record by the identifier alone", async () => {
     const mine = await given(acme, { name: "Mine" });
     const other = await given(acme, { name: "Another" });

@@ -576,7 +576,11 @@ export const controls = new Hono<OrganizationEnv>()
     if (result.outcome === "has_evidence") {
       return c.json(
         failure("has_evidence", "The control carries evidence.", [
-          { path: "", message: "A control that has evidence cannot be discarded." },
+          {
+            path: "",
+            message:
+              "Discard its evidence first. Attested evidence cannot be discarded, and then neither can the control.",
+          },
         ]),
         409,
       );

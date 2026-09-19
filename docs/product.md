@@ -64,6 +64,8 @@ What AI may not do is become an implicit source of truth. Anything it produces i
 
 Nothing yet _requires_ a person for that transition — the lifecycle makes it deliberate and the audit record makes it attributable, but no rule says an agent may not put a control into effect. Whether some acts should require a human is a real question, and `member.role` exists but does not gate domain API actions today.
 
+Attestation is the sharp edge of this: it is a signature, and signatures are not delegated. An administrator impersonating a member cannot make one — the product refuses it outright rather than recording it carefully.
+
 What it cannot currently tell is a program holding a person's credentials from that person. There are no machine credentials distinct from a human session, so anything with the cookie is that human as far as the system knows. For a record whose whole value is that somebody vouched, that is a gap worth naming.
 
 ## The open-source boundary
@@ -74,7 +76,9 @@ A managed service is planned, and what belongs to it is the operation rather tha
 
 ## Status
 
-The schema for the whole loop is in place, and PostgreSQL enforces its tenancy and finality: standards, requirements, controls, mappings, evidence, attestation and files. The API serves the first part of it: standards can be imported, and controls created, changed, moved through their lifecycle, mapped to the requirements they answer and — while they never took effect — discarded, and every change is audited and readable as history. Evidence and files are not yet reachable through the API.
+The loop exists end to end: standards can be imported, controls recorded and mapped to the requirements they answer, evidence recorded and attested, and domain API mutations are audited. Files cannot yet be attached to evidence. Better Auth operations and cascades PostgreSQL performs do not write domain audit events; `docs/data-model.md` describes the audit model.
+
+A draft control with no evidence can be discarded, and so can unattested evidence. A control that took effect is retired rather than removed, and attested evidence stays. That history is readable on its own, and outlives the records it describes.
 
 There is no user interface, no deployment artifact, and none of the entities beyond that loop.
 

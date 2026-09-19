@@ -43,6 +43,13 @@ export type OrganizationEnv = {
      * for the same reason: a handler says what happened, never who did it.
      */
     audit: RecordChange;
+    /**
+     * Who the request is attributable to, resolved once. Handlers that record
+     * attribution of their own — an attestation, say — take it from here
+     * rather than from the session user, which under impersonation is the
+     * member being acted as rather than the administrator acting.
+     */
+    actor: Actor;
   };
 };
 
@@ -138,6 +145,7 @@ export function organizationContext<Q extends PgQueryResultHKT>({
         }
       : { type: "user", id: session.user.id, label: session.user.name || null };
 
+    c.set("actor", actor);
     c.set("audit", (tx, change) => recordChange(tx, actor, organizationId, change));
     // The driver is erased here so handlers need not be generic over it; every
     // transaction method a handler uses is identical across drivers.

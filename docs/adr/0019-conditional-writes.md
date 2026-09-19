@@ -43,7 +43,7 @@ The field is parsed rather than split. An entity tag is opaque and quoted, so a 
 
 **Preconditions are evaluated last.** A refusal that would have happened anyway — an illegal transition, a control that has been in effect, one carrying evidence, attested evidence — is answered before the tag is looked at. RFC 9110 §13.2.1 asks for that, and there is a second reason: checking the tag first makes a request that was going to be refused disclose whether the caller's tag matched.
 
-**ETags are served where a client would get one**: reading a control, reading evidence, and the `PATCH` response of each, so a client can make a second edit without reading again. The published document declares the header on each of those responses — one that asks for `If-Match` and never says where the tag comes from describes half a contract.
+**ETags are served on individual control and evidence reads and their `PATCH` responses**, so a client can make a second edit without reading again. Evidence creation also returns its first tag, allowing the returned record to be attested without another read. The published document declares the header on each of those responses — one that asks for `If-Match` and never says where the tag comes from describes half a contract.
 
 ## Consequences
 
@@ -55,8 +55,8 @@ That tag says nothing about _when_. Two equal sets are indistinguishable, which 
 
 **The listing reads its page and its version from one snapshot.** Under `read committed` those are two statements and can see two different committed sets, which would hand a client a version for membership it was never shown. `withOrganization` takes a `repeatableRead` option for reads whose answers have to agree with each other. Reading one piece of evidence and listing a control's evidence use it too, for the same reason: a row and its separately queried attachments are two statements, and the tag an attestation quotes has to describe the files shown beside it. No write uses it — a write deciding from what is stored _now_ wants the opposite.
 
-For row tags, the version is selected alongside the columns, so one query serves both the body and the tag; `withoutVersion` strips it before the response. Tests check representative responses against the strict published schemas ([ADR 0007](0007-openapi-from-the-schemas.md)); handlers do not validate outgoing responses at runtime.
+For row tags, the version is selected alongside the record's columns and omitted from the JSON response body. Tests check representative responses against the strict published schemas ([ADR 0007](0007-openapi-from-the-schemas.md)); handlers do not validate outgoing responses at runtime.
 
-Nothing obliges a client to use this, so nothing guarantees a careless one is safe. That is the cost of optional, taken knowingly: the product now offers the guarantee rather than enforcing it, and a client that wants to be careful can be.
+Outside attestation, clients must opt into conditional writes; omitting `If-Match` leaves them unprotected against concurrent changes. That is the cost of optional, taken knowingly: the product offers the guarantee rather than enforcing it.
 
 `xmin` is a 32-bit counter and wraps. Two rows can therefore present the same tag, which does not matter — a tag is only ever compared against the row it was read from. What would matter is a row's `xmin` returning to a value a client still holds, which needs the counter to wrap between the read and the write; a stale tag matching wrongly is then possible in theory and not worth engineering against here.

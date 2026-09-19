@@ -58,39 +58,6 @@ const asJson = (body: unknown) => ({
   body: JSON.stringify(body),
 });
 
-/**
- * Evidence against a control, written as the runtime role inside the tenant.
- * No route records evidence yet; the table, its policies and the privileges
- * are what is being tested.
- */
-const recordEvidence = (controlId: string, { attested = false } = {}) =>
-  withOrganization(db, acme.organizationId, async (tx) => {
-    const [row] = await tx
-      .insert(schema.evidence)
-      .values({
-        organizationId: acme.organizationId,
-        controlId,
-        title: "Minutes",
-        occurredAt: new Date("2026-07-01T09:00:00.000Z"),
-      })
-      .returning();
-    if (attested) {
-      const [signed] = await tx
-        .update(schema.evidence)
-        .set({
-          attestedAt: new Date(),
-          attestedById: "usr_0000000000000000",
-          attestedByLabel: "Ada",
-        })
-        .where(eq(schema.evidence.id, row!.id))
-        .returning();
-      // A fixture that silently failed to attest would let every test built
-      // on it pass for the wrong reason.
-      expect(signed?.attestedAt).toBeInstanceOf(Date);
-    }
-    return row!.id;
-  });
-
 /** Whether a statement was refused, and what PostgreSQL said. */
 async function refused(statement: string): Promise<string> {
   try {
@@ -160,19 +127,14 @@ describe("the product runs on the privileges it documents", () => {
     expect(acme.organizationId).toMatch(/^org_[0-9a-z]{16}$/);
   });
 
-  it("changes a control and reads its history", async () => {
-    const activated = await request(acme, `/controls/${control}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ status: "active" }),
-    });
-    expect(activated.status).toBe(200);
+  it("records evidence against a control", async () => {
+    const evidence = await request(
+      acme,
+      `/controls/${control}/evidence`,
+      asJson({ title: "Q3 review", occurredAt: "2026-07-01T09:00:00.000Z" }),
+    );
 
-    const history = await request(acme, `/history?resource=${control}`);
-    const { data } = await json<{ data: { action: string }[] }>(history);
-
-    expect(history.status).toBe(200);
-    expect(data.map((event) => event.action).sort()).toEqual(["created", "updated"]);
+    expect(evidence.status).toBe(201);
   });
 
   it("imports a standard and maps a control to it", async () => {
@@ -198,6 +160,29 @@ describe("the product runs on the privileges it documents", () => {
     });
 
     expect(mapped.status).toBe(200);
+  });
+
+  it("attests evidence and then refuses to change it", async () => {
+    const evidence = await request(
+      acme,
+      `/controls/${control}/evidence`,
+      asJson({ title: "Attested here", occurredAt: "2026-07-01T09:00:00.000Z" }),
+    );
+    const evidenceId = (await json<{ data: { id: string } }>(evidence)).data.id;
+    const tag = (await request(acme, `/evidence/${evidenceId}`)).headers.get("etag")!;
+
+    const attested = await request(acme, `/evidence/${evidenceId}/attestation`, {
+      method: "PUT",
+      headers: { "if-match": tag },
+    });
+    const amended = await request(acme, `/evidence/${evidenceId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "Rewritten" }),
+    });
+
+    expect(attested.status).toBe(200);
+    expect(amended.status).toBe(409);
   });
 
   it("needs no privilege on a sequence, because nothing here has one", async () => {
@@ -242,7 +227,15 @@ describe("what the runtime role cannot do", () => {
 
   it("cannot change attested evidence, though it may change a draft", async () => {
     // Here the privilege is granted and the policy is what refuses: evidence is
-    // ordinary until it is attested.
+    // ordinary until it is attested (ADR 0012).
+    const record = async () => {
+      const evidence = await request(
+        acme,
+        `/controls/${control}/evidence`,
+        asJson({ title: "Final", occurredAt: "2026-07-01T09:00:00.000Z" }),
+      );
+      return (await json<{ data: { id: string } }>(evidence)).data.id;
+    };
     const retitle = (evidenceId: string) =>
       withOrganization(db, acme.organizationId, (tx) =>
         tx
@@ -252,8 +245,19 @@ describe("what the runtime role cannot do", () => {
           .returning(),
       );
 
-    expect(await retitle(await recordEvidence(control))).toHaveLength(1);
-    expect(await retitle(await recordEvidence(control, { attested: true }))).toEqual([]);
+    expect(await retitle(await record())).toHaveLength(1);
+
+    const signed = await record();
+    const tag = (await request(acme, `/evidence/${signed}`)).headers.get("etag")!;
+    const attested = await request(acme, `/evidence/${signed}/attestation`, {
+      method: "PUT",
+      headers: { "if-match": tag },
+    });
+    // Without this, a failed attestation would let the refusal below pass for
+    // the wrong reason.
+    expect(attested.status).toBe(200);
+
+    expect(await retitle(signed)).toEqual([]);
   });
 
   it("offers no route that would delete an organization", async () => {
@@ -284,7 +288,12 @@ describe("what the runtime role cannot do", () => {
     // and the delete would match nothing for the wrong reason.
     const made = await request(acme, "/controls", asJson({ name: "Backup restore" }));
     const doomed = (await json<{ data: { id: string } }>(made)).data.id;
-    await recordEvidence(doomed);
+    const recorded = await request(
+      acme,
+      `/controls/${doomed}/evidence`,
+      asJson({ title: "Restored", occurredAt: "2026-07-01T09:00:00.000Z" }),
+    );
+    expect(recorded.status).toBe(201);
 
     // Drizzle wraps the driver's error, so PostgreSQL's reason is the cause.
     const error = await withOrganization(db, acme.organizationId, (tx) =>

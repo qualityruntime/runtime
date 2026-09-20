@@ -110,14 +110,16 @@ File bytes live in an S3-compatible bucket rather than a directory ([ADR 0021](a
 ```sh
 docker run -d --name qualityruntime-storage -p 9000:9000 -p 9001:9001 \
   -e MINIO_ROOT_USER=qualityruntime -e MINIO_ROOT_PASSWORD=qualityruntime \
-  minio/minio server /data --console-address :9001
+  quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data --console-address :9001
 
-docker run --rm --network host --entrypoint sh minio/mc -c \
+docker run --rm --network host --entrypoint sh quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
   "mc alias set local http://localhost:9000 qualityruntime qualityruntime \
    && mc mb --ignore-existing local/qualityruntime"
 ```
 
 The client is a second image rather than `docker exec` into the first, because the server image is not guaranteed to carry one. The values match `.env.example`, and the console is at `http://localhost:9001` if you want to look at what the runtime wrote.
+
+**Why these image references are what they are.** `minio/minio` and `minio/mc` on Docker Hub have been removed, so anything pulling them now fails with `repository does not exist`; quay.io is where the open-source images remain. They are pinned because that line is no longer moving — MinIO's ongoing product is AIStor, `quay.io/minio/aistor/minio`, which refuses to start without a license file and is not open-source, so it cannot stand in here. A floating tag would therefore buy nothing and hide the day these images go too. Any S3-compatible store works; MinIO is only what this repository happens to test against ([ADR 0021](adr/0021-file-bytes-in-object-storage.md)).
 
 ```sh
 bun run dev   # http://localhost:3000, restarting on change

@@ -41,11 +41,15 @@ jobs:
       # of its own, which `services:` cannot give it. The client is a second
       # image for the reason `docs/development.md` gives: the server image is
       # not guaranteed to carry one.
+      #
+      # From quay.io and pinned, both deliberately — `docs/development.md`
+      # says why, and changing either of these without reading it is how CI
+      # stops being able to pull a store at all.
       - name: Start an S3-compatible store
         run: |
           docker run -d --name qualityruntime-storage -p 9000:9000 \
             -e MINIO_ROOT_USER=qualityruntime -e MINIO_ROOT_PASSWORD=qualityruntime \
-            minio/minio server /data
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
           # `if` rather than `curl … && break`: a failing poll inside a `&&`
           # list is the whole command failing, and the step runs under `set -e`.
           ready=
@@ -61,7 +65,7 @@ jobs:
             docker logs qualityruntime-storage
             exit 1
           fi
-          docker run --rm --network host --entrypoint sh minio/mc -c \
+          docker run --rm --network host --entrypoint sh quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
             "mc alias set local http://localhost:9000 qualityruntime qualityruntime \
              && mc mb --ignore-existing local/qualityruntime"
       # PGlite runs PostgreSQL in-process and an S3 answering in memory stands

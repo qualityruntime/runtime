@@ -31,6 +31,7 @@ import {
   evidenceResponse,
   requirementEvidenceOrder,
 } from "./evidence.ts";
+import { fileResponse, fileUploadResponse, maxFileBytes, prepareUploadBody } from "./files.ts";
 import { requirementControlsOrder, requirementResponse } from "./requirements.ts";
 import {
   importBody,
@@ -114,6 +115,8 @@ const pathParameterTypes: Record<string, IdType> = {
   standardId: "standard",
   requirementId: "requirement",
   evidenceId: "evidence",
+  fileId: "file",
+  uploadId: "fileUpload",
 };
 
 /** Derived from the path itself, so a parameter cannot be left undescribed. */
@@ -149,11 +152,16 @@ type Operation = {
   method: "get" | "post" | "patch" | "put" | "delete";
   path: string;
   summary: string;
+  /** More than a summary, where the operation is part of a sequence. */
+  description?: string;
   query?: z.ZodObject;
   request?: z.ZodType;
   /** Additional request parameters, including optional and required headers. */
   parameters?: unknown[];
-  responses: Record<string, { description: string; content?: unknown }>;
+  responses: Record<
+    string,
+    { description: string; content?: unknown; headers?: Record<string, unknown> }
+  >;
 };
 
 const tenant = "/api/v1/organizations/{organizationId}";
@@ -375,7 +383,7 @@ const operations: Operation[] = [
   {
     method: "delete",
     path: `${tenant}/evidence/{evidenceId}`,
-    summary: "Discard unattested evidence.",
+    summary: "Discard unattested evidence, and the files attached to it.",
     parameters: [conditional],
     responses: {
       "204": { description: "The evidence is gone." },
@@ -408,6 +416,65 @@ const operations: Operation[] = [
       "409": fails("The evidence has already been attested."),
       "412": fails("If-Match does not match the evidence's current ETag."),
       "428": fails("If-Match is required."),
+    },
+  },
+  {
+    method: "post",
+    path: `${tenant}/evidence/{evidenceId}/file-uploads`,
+    summary: "Authorize an upload, and get a URL to send the bytes to.",
+    description:
+      "Attaching a file takes three requests. This one authorizes it and answers with a " +
+      "short-lived signed URL; send the bytes there with a single `PUT`; then complete the " +
+      "upload to attach the file. Your bytes never pass through this API, so nothing here " +
+      "bounds how large a request may be — the file is bounded instead, at " +
+      `${maxFileBytes} bytes, measured from what the store ends up holding.`,
+    request: prepareUploadBody,
+    responses: {
+      "201": responds("An upload, and where to send the bytes.", single(fileUploadResponse)),
+      "400": fails("The body is not valid."),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such evidence."),
+      "409": fails("The evidence is attested, or already carries as many files as it may."),
+      "413": fails("The declared size is larger than a file may be."),
+    },
+  },
+  {
+    method: "put",
+    path: `${tenant}/file-uploads/{uploadId}/completion`,
+    summary: "Attach the uploaded bytes to the evidence, once they have been sent.",
+    description:
+      "Checks what the store actually holds — its size, and its SHA-256 as this server " +
+      "computed it — and records the file. Safe to retry: an upload that has already been " +
+      "completed answers with the same file rather than attaching a second one.",
+    responses: {
+      "200": responds("The file that was attached.", single(fileResponse)),
+      "400": fails("The uploaded object is empty."),
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such upload."),
+      "409": fails(
+        "Nothing was uploaded, the bytes changed while they were being checked, or the " +
+          "evidence is attested or already carries as many files as it may.",
+      ),
+      "410": fails("The upload window has closed."),
+      "413": fails("The uploaded object is larger than a file may be."),
+    },
+  },
+  {
+    method: "get",
+    path: `${tenant}/files/{fileId}`,
+    summary: "Download a file's contents.",
+    description:
+      "Answers `303` with a short-lived signed URL for the bytes, which are served as an " +
+      "attachment. Follow the redirect; do not keep the URL.",
+    responses: {
+      "303": {
+        description: "Where to read the bytes, for the next minute.",
+        headers: {
+          Location: { schema: { type: "string" }, description: "A short-lived signed URL." },
+        },
+      },
+      "401": fails("The request is not authenticated."),
+      "404": fails("No such file."),
     },
   },
   {
@@ -486,6 +553,7 @@ export function openApiDocument(sessionCookie: string) {
     paths[operation.path] ??= {};
     paths[operation.path]![operation.method] = {
       summary: operation.summary,
+      ...(operation.description ? { description: operation.description } : {}),
       ...(parameters.length > 0 ? { parameters } : {}),
       ...(operation.request ? { requestBody: body(operation.request) } : {}),
       responses: operation.responses,

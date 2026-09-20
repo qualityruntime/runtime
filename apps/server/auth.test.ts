@@ -16,6 +16,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+
 import { PGlite } from "@electric-sql/pglite";
 import { schema } from "@qualityruntime/db";
 import { getAuthTables } from "better-auth/db";
@@ -24,6 +25,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { createApp } from "./app.ts";
+import { inMemoryObjectStore } from "./s3-in-memory.ts";
 import { type Auth, authOptions, createAuth } from "./auth.ts";
 
 const migrationsFolder = fileURLToPath(new URL("../../packages/db/migrations", import.meta.url));
@@ -41,7 +43,7 @@ beforeAll(async () => {
     baseURL: "http://localhost",
     secret: "test-secret-of-at-least-32-characters",
   });
-  app = createApp({ auth, db });
+  app = createApp({ auth, db, store: inMemoryObjectStore().store });
 }, 60_000);
 
 /** Drops the response attributes so the value is a valid `Cookie` request header. */
@@ -121,6 +123,25 @@ describe("Better Auth writes against the migrated schema", () => {
       .from(schema.session)
       .where(eq(schema.session.userId, user.id));
     expect(session?.id).toMatch(/^ses_[0-9a-z]{16}$/);
+  });
+
+  it("keeps the cookies a sign-in sets to /api, and to this host", async () => {
+    // Both halves of the rule a storage hostname of its own relies on: the
+    // path, and the absence of a `Domain`, which is what leaves this cookie
+    // host-only (`assertStorageOutsideCookiePath`). `defaultCookieAttributes`
+    // is where both live, so this checks it is in force rather than
+    // enumerating every flow a plugin may add.
+    const response = await signUp("paths@example.test");
+    const cookies = response.headers.getSetCookie();
+
+    expect(cookies.length).toBeGreaterThan(0);
+    for (const cookie of cookies) {
+      // Split into attributes rather than searched: `Path=/api/v1` contains
+      // `path=/api` and is a different rule, and so is `Path=/api2`.
+      const attributes = cookie.split(";").map((part) => part.trim().toLowerCase());
+      expect(attributes).toContain("path=/api");
+      expect(attributes.some((attribute) => attribute.startsWith("domain="))).toBe(false);
+    }
   });
 
   it("creates an organization with its owner membership", async () => {

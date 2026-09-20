@@ -18,6 +18,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+
 import { PGlite } from "@electric-sql/pglite";
 import { schema, withOrganization } from "@qualityruntime/db";
 import { eq } from "drizzle-orm";
@@ -26,6 +27,7 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { createApp } from "./app.ts";
 import { createAuth } from "./auth.ts";
+import { attachFile, inMemoryObjectStore } from "./s3-in-memory.ts";
 
 const migrationsFolder = fileURLToPath(new URL("../../packages/db/migrations", import.meta.url));
 
@@ -35,6 +37,7 @@ const runtime = "qualityruntime";
 let client: PGlite;
 let db: ReturnType<typeof createTestDatabase>;
 let app: ReturnType<typeof createApp>;
+const storage = inMemoryObjectStore();
 
 const createTestDatabase = (pg: PGlite) => drizzle({ client: pg, schema, casing: "snake_case" });
 
@@ -88,12 +91,15 @@ beforeAll(async () => {
     REVOKE UPDATE, DELETE ON "audit_event" FROM ${runtime};
     REVOKE UPDATE, DELETE ON "file" FROM ${runtime};
     REVOKE UPDATE ON "control_requirement" FROM ${runtime};
+    REVOKE UPDATE ON "file_upload" FROM ${runtime};
+    GRANT UPDATE ("file_id") ON "file_upload" TO ${runtime};
     REVOKE DELETE ON "organization" FROM ${runtime};
     SET ROLE ${runtime};
   `);
 
   app = createApp({
     db,
+    store: storage.store,
     auth: createAuth(db, {
       baseURL: "http://localhost",
       secret: "test-secret-of-at-least-32-characters",
@@ -127,14 +133,24 @@ describe("the product runs on the privileges it documents", () => {
     expect(acme.organizationId).toMatch(/^org_[0-9a-z]{16}$/);
   });
 
-  it("records evidence against a control", async () => {
+  it("records a control, its evidence, and a file", async () => {
     const evidence = await request(
       acme,
       `/controls/${control}/evidence`,
       asJson({ title: "Q3 review", occurredAt: "2026-07-01T09:00:00.000Z" }),
     );
-
     expect(evidence.status).toBe(201);
+    const evidenceId = (await json<{ data: { id: string } }>(evidence)).data.id;
+
+    const uploaded = await attachFile(
+      storage,
+      (path, init) => request(acme, path, init),
+      evidenceId,
+      "the minutes",
+      { filename: "notes.txt" },
+    );
+
+    expect(uploaded.status).toBe(200);
   });
 
   it("imports a standard and maps a control to it", async () => {
@@ -223,6 +239,22 @@ describe("what the runtime role cannot do", () => {
       /permission|denied/i,
     );
     expect(await refused(`DELETE FROM "audit_event"`)).toMatch(/permission|denied/i);
+  });
+
+  it("can only ever name the file an upload produced, not move the upload", async () => {
+    // The completion handler reads an upload, spends minutes reading and
+    // hashing bytes, and then writes a `file` row from the values it read
+    // first. That is sound because nothing moves an upload after it is
+    // prepared — which is a privilege here rather than a comment there.
+    for (const column of ["evidence_id", "filename", "content_type", "expires_at"]) {
+      expect(await refused(`UPDATE "file_upload" SET "${column}" = DEFAULT`)).toMatch(
+        /permission|denied/i,
+      );
+    }
+    // And the one it does hold still works, lock included: completion is an
+    // ordinary part of the product, exercised end to end above.
+    await client.exec(`UPDATE "file_upload" SET "file_id" = "file_id";`);
+    await client.exec(`BEGIN; SELECT * FROM "file_upload" FOR UPDATE; COMMIT;`);
   });
 
   it("cannot change attested evidence, though it may change a draft", async () => {

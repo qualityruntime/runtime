@@ -42,6 +42,8 @@ ALTER TABLE "evidence" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "evidence" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "file" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "file" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
+ALTER TABLE "file_upload" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
+ALTER TABLE "file_upload" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "audit_event" ENABLE ROW LEVEL SECURITY;--> statement-breakpoint
 ALTER TABLE "audit_event" FORCE ROW LEVEL SECURITY;--> statement-breakpoint
 
@@ -161,6 +163,77 @@ $$;--> statement-breakpoint
 CREATE TRIGGER "file_evidence_open"
   BEFORE INSERT ON "file"
   FOR EACH ROW EXECUTE FUNCTION "file_evidence_open"();--> statement-breakpoint
+
+-- An upload intent is permission to attempt an upload, not a claim on one, so
+-- there is deliberately no trigger here: the `FOR NO KEY UPDATE` that
+-- `file_evidence_open` takes would, at prepare time, reserve an attachment
+-- slot and stand in an attestation's way. Evidence attested between preparing
+-- and completing refuses the completion at the `file` insert instead.
+--
+-- The handler does hold `FOR KEY SHARE` while preparing, which conflicts only
+-- with the `FOR UPDATE` a discard holds: it stops the evidence vanishing
+-- between the read and this table's foreign key insert, and reserves nothing.
+--
+-- Unlike `file`, this is infrastructure state the runtime owns: written,
+-- updated once, eventually reclaimed. See
+-- docs/adr/0021-file-bytes-in-object-storage.md.
+CREATE POLICY "file_upload_tenant_read" ON "file_upload" FOR SELECT
+  USING ("organization_id" = current_setting('qualityruntime.organization_id', true));--> statement-breakpoint
+
+-- Prepared open, always. An upload that arrived already naming a file would
+-- have skipped the transition the two policies below exist to govern, and the
+-- runtime holds `UPDATE` on `file_id` precisely so that the transition is the
+-- only way a row gets one.
+CREATE POLICY "file_upload_tenant_prepare" ON "file_upload" FOR INSERT
+  WITH CHECK (
+    "organization_id" = current_setting('qualityruntime.organization_id', true)
+    AND "file_id" IS NULL
+  );--> statement-breakpoint
+
+-- Completion names the file this upload produced, once, and only while the
+-- window it was given is open. An upload that already has one cannot be
+-- updated at all, which is the whole idempotency story: a retry reads the row
+-- and answers with the same file, and a second completion racing the first
+-- matches nothing and rolls back.
+--
+-- The expiry test is here rather than only in the handler, which cannot hold
+-- it: the handler checks the window and then spends a 25 MiB copy and read
+-- before it writes anything. This makes the deadline the API advertises the
+-- one the database keeps, and is the exact complement of the reclaim policy.
+--
+-- `clock_timestamp()` rather than `now()`, which is frozen at transaction
+-- start: this transaction locks the evidence first and may wait there, so
+-- `now()` would admit an upload that ran out while it waited.
+--
+-- This is a policy rather than a trigger because the row it tests is the row
+-- being written. PostgreSQL locks that row, waits for the concurrent writer,
+-- and re-checks the predicate against the version that committed — so unlike
+-- the evidence test above, no separate lock is needed for it to hold.
+CREATE POLICY "file_upload_tenant_complete" ON "file_upload" FOR UPDATE
+  USING (
+    "organization_id" = current_setting('qualityruntime.organization_id', true)
+    AND "file_id" IS NULL
+    AND "expires_at" > clock_timestamp()
+  )
+  WITH CHECK ("organization_id" = current_setting('qualityruntime.organization_id', true));--> statement-breakpoint
+
+-- Reclaiming an upload that was abandoned. Only one that expired and never
+-- became a file: a completed row is the record of which file an upload id
+-- produced, and removing it would let a retry attach a second one.
+--
+-- This is the exact complement of the completion policy above — `<=` against
+-- `>`, on the same clock — so every *uncompleted* row is admitted by one of
+-- them and none by both. A completed row is admitted by neither, which is the
+-- other half of the idempotency story. A sweep therefore cannot delete a row out from under a completion
+-- that would otherwise have succeeded. `reclaim.ts` waits longer still, so
+-- that a late completion is told its window closed rather than that its upload
+-- never existed.
+CREATE POLICY "file_upload_tenant_reclaim" ON "file_upload" FOR DELETE
+  USING (
+    "organization_id" = current_setting('qualityruntime.organization_id', true)
+    AND "file_id" IS NULL
+    AND "expires_at" <= clock_timestamp()
+  );--> statement-breakpoint
 
 -- A control that was in effect is part of the record and is retired rather than
 -- removed. One that never took effect was never relied on, and an abandoned

@@ -12,8 +12,10 @@ import { controls } from "./controls.ts";
 import { failure } from "./responses.ts";
 import { openApiDocument, openApiPath, referencePath } from "./openapi.ts";
 import { organizationContext } from "./organization.ts";
+import type { ObjectStore } from "./objects.ts";
 import { evidence } from "./evidence.ts";
 import { history } from "./history.ts";
+import { files } from "./files.ts";
 import { requirements } from "./requirements.ts";
 import { standards } from "./standards.ts";
 
@@ -37,10 +39,13 @@ import { standards } from "./standards.ts";
 export function createApp<Q extends PgQueryResultHKT>({
   auth,
   db,
+  store,
   apiReferenceBundleUrl,
 }: {
   auth: Auth;
   db: RootDatabase<Q>;
+  /** Where file bytes live, supplied by the deployment (ADR 0021). */
+  store: ObjectStore;
   /**
    * Where the rendered reference loads its bundle from, when not the CDN.
    *
@@ -70,7 +75,6 @@ export function createApp<Q extends PgQueryResultHKT>({
   const standardImport = bodyLimit({ maxSize: 1024 * 1024, onError: tooLarge });
   const importsAStandard = (c: Context) =>
     c.req.method === "POST" && /^\/api\/v1\/organizations\/[^/]+\/standards$/.test(c.req.path);
-
   return (
     new Hono()
       .notFound((c) => c.json(failure("not_found", "No such endpoint."), 404))
@@ -103,6 +107,10 @@ export function createApp<Q extends PgQueryResultHKT>({
           ...(apiReferenceBundleUrl ? { cdn: apiReferenceBundleUrl } : {}),
         }),
       )
+      // Every body under `/api/v1` is JSON a handler will parse, so one figure
+      // fits all of them bar a standard. File bytes never arrive here at all:
+      // they go to object storage directly (ADR 0021), which is what removed
+      // the exception this used to carry for uploads.
       .use("/api/v1/*", (c, next) => (importsAStandard(c) ? standardImport : ordinary)(c, next))
       .use(`${tenant}/*`, organizationContext({ auth, db }))
       .route(tenant, controls)
@@ -110,5 +118,6 @@ export function createApp<Q extends PgQueryResultHKT>({
       .route(tenant, standards)
       .route(tenant, requirements)
       .route(tenant, evidence)
+      .route(tenant, files(store))
   );
 }

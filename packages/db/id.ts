@@ -55,6 +55,7 @@ export const idFormats = {
   requirement: { prefix: "req", length: 16 },
   evidence: { prefix: "evd", length: 16 },
   file: { prefix: "fil", length: 16 },
+  fileUpload: { prefix: "upl", length: 16 },
 } as const;
 
 export type IdType = keyof typeof idFormats;

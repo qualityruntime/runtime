@@ -48,7 +48,7 @@ Quality Runtime is being designed as a TypeScript application with these layers:
                   email, AI, etc.
 ```
 
-Domain mutation rules still live in route handlers, which use a Hono context to resolve the tenant and attribute changes. Extract them when a non-HTTP caller needs them, into functions taking explicit inputs and actor context; PostgreSQL tenant scoping and audit recording are already available independently of Hono.
+Domain mutation rules still live in route handlers, which use a Hono context to resolve the tenant and attribute changes. File verification already runs outside HTTP through `integrity.ts`, taking a database handle and a store ([ADR 0016](docs/adr/0016-verifying-stored-bytes.md)). Extract mutation rules when a non-HTTP caller needs them, into functions taking explicit inputs and actor context; PostgreSQL tenant scoping and audit recording are already available independently of Hono.
 
 Deployment environments sit outside the core application:
 
@@ -168,7 +168,7 @@ Jobs must tolerate retries and duplicate execution.
 
 ## Storage
 
-PostgreSQL is the source of truth for file metadata, relationships, and access-control state; durable storage owns the bytes. The application authorizes file access from PostgreSQL-backed state, never from storage location alone.
+PostgreSQL is the source of truth for file metadata, relationships, and access-control state; object storage owns the bytes. The application authorizes file access from PostgreSQL-backed state, never from storage location alone, and then issues a short-lived signed URL rather than carrying the bytes itself ([ADR 0021](docs/adr/0021-file-bytes-in-object-storage.md)).
 
 Persistent file storage must not rely on process memory or ephemeral local storage. Vendor-specific storage concepts stay outside domain logic.
 
@@ -191,7 +191,7 @@ Deployment-specific and private extensions add behavior without requiring change
 The intended minimal self-hosted production deployment requires only:
 
 ```text
-Quality Runtime + PostgreSQL + durable file storage (a mounted volume is enough)
+Quality Runtime + PostgreSQL + an S3-compatible object store
 ```
 
 Additional services must not become mandatory without strong operational justification.
@@ -239,6 +239,8 @@ Controlled or finalized records must not silently lose historical state.
 
 **EXT-01 — Extensions add rather than patch**
 Customization prefers explicit composition points over modifications to core implementation.
+
+Nothing implements this yet: there is no extension mechanism, and the only composition point that exists is the `ObjectStore` interface a deployment supplies. It is a rule for when one arrives, not a description of something here.
 
 ## Changing the architecture
 

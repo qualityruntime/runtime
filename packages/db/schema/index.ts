@@ -13,5 +13,6 @@ export * from "./auth.ts";
 export * from "./control.ts";
 export * from "./evidence.ts";
 export * from "./file.ts";
+export * from "./file-upload.ts";
 export * from "./control-requirement.ts";
 export * from "./standard.ts";

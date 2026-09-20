@@ -40,7 +40,7 @@ Apps go in `apps/`, shared code in `packages/` — extract a package only when t
 - Do not add speculative extension points.
 - Add or update tests for important behavior.
 - Never weaken tenant isolation, authorization, auditability, or data integrity for convenience.
-- Never modify an existing applied database migration; add a new one.
+- Never modify an existing applied database migration; add a new one. Until the first release there is no such migration — no deployment is supported yet, so the schema is edited in place and databases are rebuilt.
 - Sign off commits with `git commit -s` (Developer Certificate of Origin). Commits authored as `quality-runtime[bot]` are not signed off — a bot cannot make the certification — and pull requests it opens are exempt from the check.
 
 ## Licensing

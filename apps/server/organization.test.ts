@@ -17,6 +17,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+
 import { PGlite } from "@electric-sql/pglite";
 import { schema } from "@qualityruntime/db";
 import { eq } from "drizzle-orm";
@@ -25,6 +26,7 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { Hono } from "hono";
 import { createApp } from "./app.ts";
+import { inMemoryObjectStore } from "./s3-in-memory.ts";
 import { type Auth, createAuth } from "./auth.ts";
 import { organizationContext, type OrganizationEnv } from "./organization.ts";
 
@@ -86,6 +88,7 @@ beforeAll(async () => {
   });
   app = createApp({
     db,
+    store: inMemoryObjectStore().store,
     auth,
   });
 

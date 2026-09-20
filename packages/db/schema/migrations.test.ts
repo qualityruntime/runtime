@@ -19,6 +19,9 @@ import * as schema from "./index.ts";
 import * as auth from "./auth.ts";
 import { account, member, organization, session, user } from "./auth.ts";
 import { control } from "./control.ts";
+import { evidence } from "./evidence.ts";
+import { file } from "./file.ts";
+import { fileUpload } from "./file-upload.ts";
 import { requirement, standard } from "./standard.ts";
 
 /** The same folder `drizzle-kit migrate` applies, resolved from this module. */
@@ -89,6 +92,7 @@ describe("migrations", () => {
       "control_requirement",
       "evidence",
       "file",
+      "file_upload",
       "requirement",
       "standard",
     ]);
@@ -356,6 +360,77 @@ describe("standards and requirements", () => {
     expect(
       await db.select().from(requirement).where(eq(requirement.organizationId, org!.id)),
     ).toEqual([]);
+  });
+});
+
+describe("file_upload", () => {
+  /** A tenant with a control and a piece of evidence to upload against. */
+  const somewhereToUpload = async () => {
+    const [org] = await db.insert(organization).values(newOrganization()).returning();
+    const [parent] = await db
+      .insert(control)
+      .values({ organizationId: org!.id, name: "Access review" })
+      .returning();
+    const [record] = await db
+      .insert(evidence)
+      .values({
+        organizationId: org!.id,
+        controlId: parent!.id,
+        title: "Minutes",
+        occurredAt: new Date(),
+      })
+      .returning();
+    return { organizationId: org!.id, evidenceId: record!.id };
+  };
+
+  const intent = (where: { organizationId: string; evidenceId: string }) => ({
+    ...where,
+    filename: "minutes.pdf",
+    contentType: "application/pdf",
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+
+  it("refuses a content type that could not be served", async () => {
+    // Refused here rather than at completion, where it would be a 500 after
+    // the client had already uploaded the bytes: `file` carries the same
+    // constraint and has no UPDATE policy to repair a row with.
+    const where = await somewhereToUpload();
+
+    const rejected = db
+      .insert(fileUpload)
+      .values({ ...intent(where), contentType: "text/html\r\nX-Evil: 1" });
+
+    expect(await rejectedBy(rejected)).toBe("file_upload_content_type_shape");
+  });
+
+  it("lets only one upload claim a given file", async () => {
+    const where = await somewhereToUpload();
+    const [attached] = await db
+      .insert(file)
+      .values({
+        ...where,
+        filename: "minutes.pdf",
+        contentType: "application/pdf",
+        bytes: 1,
+        checksum: "a".repeat(64),
+      })
+      .returning();
+
+    await db.insert(fileUpload).values({ ...intent(where), fileId: attached!.id });
+    const second = db.insert(fileUpload).values({ ...intent(where), fileId: attached!.id });
+
+    // Two uploads naming one file would mean two ways to retry into it.
+    expect(await rejectedBy(second)).toBe("file_upload_file_id_key");
+  });
+
+  it("leaves uncompleted uploads free of each other", async () => {
+    const where = await somewhereToUpload();
+
+    await db.insert(fileUpload).values(intent(where));
+    const [second] = await db.insert(fileUpload).values(intent(where)).returning();
+
+    // Nulls do not collide: a tenant may have many uploads in flight at once.
+    expect(second?.fileId).toBeNull();
   });
 });
 

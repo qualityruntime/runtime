@@ -37,13 +37,47 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
       - run: bun install --frozen-lockfile
       - run: bun run check
-      # PGlite runs PostgreSQL in-process, so almost nothing here needs a
-      # service. The exception is the concurrency suite: PGlite is a single
-      # connection, so a lock cannot be exercised on it, and without this a
-      # change that breaks one would pass CI (ADR 0020).
+      # MinIO is a step rather than a service because the image needs a command
+      # of its own, which `services:` cannot give it. The client is a second
+      # image for the reason `docs/development.md` gives: the server image is
+      # not guaranteed to carry one.
+      - name: Start an S3-compatible store
+        run: |
+          docker run -d --name qualityruntime-storage -p 9000:9000 \
+            -e MINIO_ROOT_USER=qualityruntime -e MINIO_ROOT_PASSWORD=qualityruntime \
+            minio/minio server /data
+          # `if` rather than `curl … && break`: a failing poll inside a `&&`
+          # list is the whole command failing, and the step runs under `set -e`.
+          ready=
+          for attempt in $(seq 1 30); do
+            if curl -sf http://localhost:9000/minio/health/live >/dev/null; then
+              ready=yes
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$ready" ]; then
+            echo "The store never became ready."
+            docker logs qualityruntime-storage
+            exit 1
+          fi
+          docker run --rm --network host --entrypoint sh minio/mc -c \
+            "mc alias set local http://localhost:9000 qualityruntime qualityruntime \
+             && mc mb --ignore-existing local/qualityruntime"
+      # PGlite runs PostgreSQL in-process and an S3 answering in memory stands
+      # in for a bucket, so almost nothing here needs either of the above. The
+      # exceptions are the two suites that cannot be honest without them: the
+      # concurrency suite, because PGlite is a single connection and a lock
+      # cannot be exercised on one (ADR 0020), and the storage integration
+      # suite, because a signature is only correct if a real server says so
+      # (ADR 0021). Without these a change breaking either would pass CI.
       - run: bun run test
         env:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/qualityruntime_test
+          TEST_STORAGE_ENDPOINT: http://localhost:9000
+          TEST_STORAGE_BUCKET: qualityruntime
+          TEST_STORAGE_ACCESS_KEY_ID: qualityruntime
+          TEST_STORAGE_SECRET_ACCESS_KEY: qualityruntime
 
   dco:
     # Trust is PR-level: the GitHub App is the only identity that can open a PR

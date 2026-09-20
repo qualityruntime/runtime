@@ -11,7 +11,7 @@
  */
 
 import { idPattern, schema, type TenantTransaction } from "@qualityruntime/db";
-import { and, eq, getTableColumns, inArray, type SQL, sql } from "drizzle-orm";
+import { and, asc, eq, getTableColumns, inArray, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { createMiddleware } from "hono/factory";
 import { z } from "zod";
@@ -27,6 +27,7 @@ import {
   page,
   rowsAfter,
 } from "./pagination.ts";
+import { fileResponse } from "./files.ts";
 import { entityTag, ifMatch, rowVersion } from "./preconditions.ts";
 import { failure } from "./responses.ts";
 import { instant, jsonBody, prose, rejection, words } from "./validation.ts";
@@ -93,6 +94,8 @@ export const evidenceResponse = z.strictObject({
     .nullable(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
+  /** What is attached. Evidence carries few enough files to list them here. */
+  files: z.array(fileResponse),
 });
 
 const version = rowVersion(schema.evidence);
@@ -160,7 +163,37 @@ const audited = ["controlId", "title", "description", "occurredAt"] as const;
 
 type Row = typeof schema.evidence.$inferSelect;
 
-/** One page of evidence narrowed by `where`. */
+type Attachment = typeof schema.file.$inferSelect;
+
+/**
+ * The files attached to each of `ids`, oldest first.
+ *
+ * One query for a whole page rather than one per row. A piece of evidence
+ * carries at most a score of files, so listing them with it is cheaper than
+ * making a client ask separately for every one.
+ */
+async function attachments(tx: TenantTransaction, ids: string[]) {
+  if (ids.length === 0) return new Map<string, Attachment[]>();
+  const rows = await tx
+    .select()
+    .from(schema.file)
+    .where(inArray(schema.file.evidenceId, ids))
+    .orderBy(asc(schema.file.createdAt), asc(schema.file.id));
+
+  const byEvidence = new Map<string, Attachment[]>();
+  for (const row of rows) {
+    byEvidence.set(row.evidenceId, [...(byEvidence.get(row.evidenceId) ?? []), row]);
+  }
+  return byEvidence;
+}
+
+/**
+ * One page of evidence narrowed by `where`, with its attachments.
+ *
+ * Takes the transaction it runs in, which its callers open as repeatable read:
+ * the page and its attachments are separate statements, and a file landing
+ * between them would appear against evidence the page read before it existed.
+ */
 async function evidencePage(
   tx: TenantTransaction,
   ordering: Ordering,
@@ -172,10 +205,17 @@ async function evidencePage(
     .where(and(where, cursor ? rowsAfter(ordering, cursor) : undefined))
     .orderBy(...orderedBy(ordering))
     .limit(limit + 1);
-  return rows;
+  return {
+    rows,
+    files: await attachments(
+      tx,
+      rows.map((row) => row.id),
+    ),
+  };
 }
 
-const evidenceShape = (row: Row) => ({
+/** Every caller states the attachments: a default would hide an empty one. */
+const evidenceShape = (row: Row, files: Attachment[]) => ({
   id: row.id,
   organizationId: row.organizationId,
   controlId: row.controlId,
@@ -188,6 +228,7 @@ const evidenceShape = (row: Row) => ({
       : null,
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
+  files,
 });
 
 export const evidence = new Hono<OrganizationEnv>()
@@ -219,8 +260,11 @@ export const evidence = new Hono<OrganizationEnv>()
     );
     if (!found) return c.json(failure("not_found", "No such control."), 404);
 
-    const { rows, nextCursor } = page(found, limit, ordering);
-    return c.json({ data: rows.map(evidenceShape), nextCursor });
+    const { rows, nextCursor } = page(found.rows, limit, ordering);
+    return c.json({
+      data: rows.map((row) => evidenceShape(row, found.files.get(row.id) ?? [])),
+      nextCursor,
+    });
   })
 
   /**
@@ -270,8 +314,11 @@ export const evidence = new Hono<OrganizationEnv>()
     );
     if (!found) return c.json(failure("not_found", "No such requirement."), 404);
 
-    const { rows, nextCursor } = page(found, limit, ordering);
-    return c.json({ data: rows.map(evidenceShape), nextCursor });
+    const { rows, nextCursor } = page(found.rows, limit, ordering);
+    return c.json({
+      data: rows.map((row) => evidenceShape(row, found.files.get(row.id) ?? [])),
+      nextCursor,
+    });
   })
 
   .post("/controls/:controlId/evidence", jsonBody(recordBody), async (c) => {
@@ -322,23 +369,32 @@ export const evidence = new Hono<OrganizationEnv>()
     // Its tag, so that what was just recorded can be attested without reading
     // it again: the body is what the client has now seen.
     c.header("etag", entityTag(result));
-    return c.json({ data: evidenceShape(result) }, 201);
+    return c.json({ data: evidenceShape(result, []) }, 201);
   })
 
   .get("/evidence/:evidenceId", knownEvidenceId, async (c) => {
     const evidenceId = c.req.param("evidenceId");
-    const [row] = await c.var.withOrganization((tx) =>
-      tx
-        .select({ ...getTableColumns(schema.evidence), version })
-        .from(schema.evidence)
-        .where(eq(schema.evidence.id, evidenceId)),
+    // One snapshot: the row and its files are two statements, and under `read
+    // committed` a file attached between them would be shown beside a version
+    // that predates it. The tag below is what an attestation quotes, so "what
+    // was signed is what was read" depends on the two agreeing (ADR 0019).
+    const found = await c.var.withOrganization(
+      async (tx) => {
+        const [row] = await tx
+          .select({ ...getTableColumns(schema.evidence), version })
+          .from(schema.evidence)
+          .where(eq(schema.evidence.id, evidenceId));
+        if (!row) return undefined;
+        return { row, files: (await attachments(tx, [evidenceId])).get(evidenceId) ?? [] };
+      },
+      { repeatableRead: true },
     );
-    if (!row) return c.json(failure("not_found", "No such evidence."), 404);
+    if (!found) return c.json(failure("not_found", "No such evidence."), 404);
 
     // What an attestation has to quote back, so that what was signed is what
     // was read.
-    c.header("etag", entityTag(row));
-    return c.json({ data: evidenceShape(row) });
+    c.header("etag", entityTag(found.row));
+    return c.json({ data: evidenceShape(found.row, found.files) });
   })
 
   .patch("/evidence/:evidenceId", knownEvidenceId, jsonBody(amendBody), async (c) => {
@@ -385,7 +441,13 @@ export const evidence = new Hono<OrganizationEnv>()
         fieldsOf(locked, audited),
         fieldsOf({ ...locked, ...updates }, audited),
       );
-      if (!changed) return { outcome: "amended", row: locked } as const;
+      if (!changed) {
+        return {
+          outcome: "amended",
+          row: locked,
+          files: (await attachments(tx, [evidenceId])).get(evidenceId) ?? [],
+        } as const;
+      }
 
       const [row] = await tx
         .update(schema.evidence)
@@ -403,7 +465,11 @@ export const evidence = new Hono<OrganizationEnv>()
         before: changed.before,
         after: changed.after,
       });
-      return { outcome: "amended", row } as const;
+      return {
+        outcome: "amended",
+        row,
+        files: (await attachments(tx, [evidenceId])).get(evidenceId) ?? [],
+      } as const;
     });
 
     if (result.outcome === "missing") {
@@ -420,7 +486,7 @@ export const evidence = new Hono<OrganizationEnv>()
     if (result.outcome === "stale") return staleEvidence(c);
 
     c.header("etag", entityTag(result.row));
-    return c.json({ data: evidenceShape(result.row) });
+    return c.json({ data: evidenceShape(result.row, result.files) });
   })
 
   .delete("/evidence/:evidenceId", knownEvidenceId, async (c) => {
@@ -458,6 +524,25 @@ export const evidence = new Hono<OrganizationEnv>()
         return { outcome: "stale" } as const;
       }
 
+      // `file` cascades from evidence, so its rows go here. The bytes do not —
+      // a foreign key cannot reach a bucket — and they are left for
+      // `bun run reclaim:storage`, which is the only thing that removes them
+      // (ADR 0021). Read first so the audit event can say what went: once the
+      // rows are gone it is the only record of what was attached.
+      const files = await tx
+        .select({
+          id: schema.file.id,
+          filename: schema.file.filename,
+          contentType: schema.file.contentType,
+          bytes: schema.file.bytes,
+          checksum: schema.file.checksum,
+        })
+        .from(schema.file)
+        .where(eq(schema.file.evidenceId, evidenceId))
+        // The order the evidence listed them in, so the event reads like the
+        // record it is replacing rather than like whatever the scan returned.
+        .orderBy(asc(schema.file.createdAt), asc(schema.file.id));
+
       const [removed] = await tx
         .delete(schema.evidence)
         .where(eq(schema.evidence.id, evidenceId))
@@ -470,7 +555,11 @@ export const evidence = new Hono<OrganizationEnv>()
         action: "deleted",
         resourceType: "evidence",
         resourceId: evidenceId,
-        before: fieldsOf(locked, audited),
+        // Each named the way the attachment event named it. Filenames repeat
+        // legally, so a list of them alone could not say which file went —
+        // and the identifier is also the storage key `reclaim:storage` will
+        // report when it removes the bytes.
+        before: { ...fieldsOf(locked, audited), files },
       });
 
       return { outcome: "discarded" } as const;
@@ -559,7 +648,11 @@ export const evidence = new Hono<OrganizationEnv>()
         resourceId: evidenceId,
         after: { attestedAt: row.attestedAt, attestedById: row.attestedById },
       });
-      return { outcome: "attested_now", row } as const;
+      return {
+        outcome: "attested_now",
+        row,
+        files: (await attachments(tx, [evidenceId])).get(evidenceId) ?? [],
+      } as const;
     });
 
     if (result.outcome === "missing") {
@@ -581,5 +674,5 @@ export const evidence = new Hono<OrganizationEnv>()
         412,
       );
     }
-    return c.json({ data: evidenceShape(result.row) });
+    return c.json({ data: evidenceShape(result.row, result.files) });
   });

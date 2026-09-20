@@ -11,7 +11,9 @@
  * are in force as they are in a deployment.
  */
 
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+
 import { PGlite } from "@electric-sql/pglite";
 import { schema, withOrganization } from "@qualityruntime/db";
 import { and, asc, eq, sql } from "drizzle-orm";
@@ -20,8 +22,19 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { createApp } from "./app.ts";
 import { createAuth } from "./auth.ts";
+import { attachFile, inMemoryObjectStore } from "./s3-in-memory.ts";
 
 const migrationsFolder = fileURLToPath(new URL("../../packages/db/migrations", import.meta.url));
+
+/** The store this run writes to, so its objects can be counted. */
+let storage: ReturnType<typeof inMemoryObjectStore>;
+
+/** A store of its own, thrown away with the run. */
+const temporaryStore = () => {
+  const made = inMemoryObjectStore();
+  storage = made;
+  return made.store;
+};
 
 const createTestDatabase = (client: PGlite) => drizzle({ client, schema, casing: "snake_case" });
 
@@ -124,6 +137,7 @@ beforeAll(async () => {
   await migrate(db, { migrationsFolder });
   app = createApp({
     db,
+    store: temporaryStore(),
     auth: createAuth(db, {
       baseURL: "http://localhost",
       secret: "test-secret-of-at-least-32-characters",
@@ -271,6 +285,26 @@ describe("amending evidence", () => {
     expect(response.headers.get("etag")).toBe(read);
     const events = await historyOf(acme, evidence.id);
     expect(events.map((event) => event.action)).toEqual(["created"]);
+  });
+
+  it("keeps showing what is attached when nothing changes", async () => {
+    // The no-op path returns the row it locked; its files have to come with it,
+    // or a client is told the attachment went away.
+    const evidence = await record(acme, control, { title: "Has a file" });
+    const uploaded = await attachFile(
+      storage,
+      (path, init) => request(acme, path, init),
+      evidence.id,
+      "still here",
+      { filename: "kept.txt" },
+    );
+    expect(uploaded.status).toBe(200);
+
+    const response = await amend(acme, evidence.id, { title: "Has a file" });
+
+    expect(response.status).toBe(200);
+    const { data } = await json<{ data: Evidence & { files: { filename: string }[] } }>(response);
+    expect(data.files.map((file) => file.filename)).toEqual(["kept.txt"]);
   });
 
   it("records what changed", async () => {
@@ -621,6 +655,53 @@ describe("discarding evidence", () => {
     expect(removed).toEqual([]);
   });
 
+  it("takes the attached files with it, and says which in the history", async () => {
+    // `file` cascades from evidence, so the rows go. The bytes stay in the
+    // bucket — a foreign key cannot reach one (ADR 0021) — so the event names
+    // what was attached, which is the only record left of it.
+    const evidence = await record(acme, control, { title: "With an attachment" });
+    const before = storage.objects.size;
+    const uploaded = await attachFile(
+      storage,
+      (path, init) => request(acme, path, init),
+      evidence.id,
+      "the minutes",
+    );
+    expect(uploaded.status).toBe(200);
+    const fileId = (await json<{ data: { id: string } }>(uploaded)).data.id;
+
+    expect((await discard(acme, evidence.id)).status).toBe(204);
+
+    expect((await request(acme, `/files/${fileId}`)).status).toBe(404);
+    const rows = await withOrganization(db, acme.organizationId, (tx) =>
+      tx.select().from(schema.file).where(eq(schema.file.id, fileId)),
+    );
+    expect(rows).toEqual([]);
+    // The bytes outlive the row: a foreign key cannot reach a bucket, so they
+    // wait for `reclaim:storage` (ADR 0021). Until then the event is the only
+    // record of what was attached, which is why it names them.
+    expect(storage.objects.size).toBe(before + 1);
+    const deletion = (await historyOf(acme, evidence.id)).find(
+      (event) => event.action === "deleted",
+    );
+    // Which control it belonged to survives the row, and so does every field
+    // that says what went: filenames repeat legally, the identifier is the
+    // storage key the bytes are still under, and the checksum is what a
+    // recovered object could be reconciled against. Whole rather than partial,
+    // so dropping one of them fails here.
+    expect(deletion?.before).toMatchObject({ controlId: control });
+    expect((deletion?.before as { files: unknown } | undefined)?.files).toEqual([
+      {
+        id: fileId,
+        filename: "minutes.txt",
+        contentType: "application/octet-stream",
+        bytes: "the minutes".length,
+        checksum: createHash("sha256").update("the minutes").digest("hex"),
+      },
+    ]);
+    expect(deletion?.after).toBeNull();
+  });
+
   it("lets the control it belonged to be discarded afterwards", async () => {
     const ours = await json<{ data: { id: string } }>(
       await app.request(`/api/v1/organizations/${acme.organizationId}/controls`, {
@@ -746,6 +827,46 @@ describe("amending and discarding only what you read", () => {
     expect((await json<Failure>(refused)).error.code).toBe("already_attested");
   });
 
+  it("moves the version when a file is attached", async () => {
+    // Files are part of how evidence reads back, so attaching one changes the
+    // record. If the tag did not move, a caller could discard evidence whose
+    // attachments it never saw — and the files would cascade away with it.
+    const evidence = await record(acme, control, { title: "Gaining a file" });
+    const read = await tagOf(evidence.id);
+
+    const uploaded = await attachFile(
+      storage,
+      (path, init) => request(acme, path, init),
+      evidence.id,
+      "arrived after the read",
+      { filename: "late.txt" },
+    );
+    expect(uploaded.status).toBe(200);
+
+    expect(await tagOf(evidence.id)).not.toBe(read);
+    const stale = await request(acme, `/evidence/${evidence.id}`, {
+      method: "DELETE",
+      headers: { "if-match": read },
+    });
+    expect(stale.status).toBe(412);
+    expect((await request(acme, `/evidence/${evidence.id}`)).status).toBe(200);
+
+    // And the history says what was attached, in the shape the deletion event
+    // uses — the two are read together, and after a cascade they are all that
+    // is left of an attachment.
+    const attached = (await historyOf(acme, evidence.id)).at(-1);
+    expect(attached?.action).toBe("updated");
+    expect(attached?.after).toEqual({
+      attached: {
+        id: (await json<{ data: { id: string } }>(uploaded)).data.id,
+        filename: "late.txt",
+        contentType: "application/octet-stream",
+        bytes: "arrived after the read".length,
+        checksum: createHash("sha256").update("arrived after the read").digest("hex"),
+      },
+    });
+  });
+
   it("still requires If-Match to attest, which is not the same thing", async () => {
     // Optional for an amendment, required for a signature: attesting means
     // attesting something in particular (ADR 0012).
@@ -783,7 +904,7 @@ describe("the evidence of the controls mapped to a requirement", () => {
   const evidenceOf = async (requirementId: string, query = "?limit=100") => {
     const response = await request(acme, `/requirements/${requirementId}/evidence${query}`);
     expect(response.status).toBe(200);
-    return json<Page<Evidence & { controlId: string }>>(response);
+    return json<Page<Evidence & { controlId: string; files: { filename: string }[] }>>(response);
   };
 
   beforeAll(async () => {
@@ -868,12 +989,20 @@ describe("the evidence of the controls mapped to a requirement", () => {
     expect((await json<Failure>(response)).error.details?.map((d) => d.path)).toContain("cursor");
   });
 
-  it("carries attestations, as the control's own list does", async () => {
+  it("carries attestations and attached files, as the control's own list does", async () => {
     const control = await newControl("Attested");
     const evidence = await record(acme, control, {
       title: "Signed",
       occurredAt: "2026-04-01T00:00:00.000Z",
     });
+    const uploaded = await attachFile(
+      storage,
+      (path, init) => request(acme, path, init),
+      evidence.id,
+      "signed minutes",
+      { filename: "signed.txt" },
+    );
+    expect(uploaded.status).toBe(200);
     expect((await attest(acme, evidence.id)).status).toBe(200);
     // Mapped after it was attested: an attestation endorses the evidence, not
     // the mapping, so it is listed all the same.
@@ -883,6 +1012,7 @@ describe("the evidence of the controls mapped to a requirement", () => {
 
     expect(data).toHaveLength(1);
     expect(data[0]!.attestation?.by.id).toBe(acme.userId);
+    expect(data[0]!.files.map((file) => file.filename)).toEqual(["signed.txt"]);
   });
 
   it("includes a retired control's evidence, and drops an unmapped one's", async () => {

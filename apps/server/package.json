@@ -8,6 +8,7 @@
     "@better-auth/drizzle-adapter": "1.7.5",
     "@qualityruntime/db": "workspace:*",
     "@scalar/hono-api-reference": "^0.12.2",
+    "aws4fetch": "^1.0.20",
     "better-auth": "1.7.5",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.10.7",

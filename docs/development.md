@@ -105,13 +105,86 @@ After upgrading `better-auth`, run `bun run test`, then compare `packages/db/sch
 
 ## Running the server
 
+File bytes live in an S3-compatible bucket rather than a directory ([ADR 0021](adr/0021-file-bytes-in-object-storage.md)), so development runs one locally. MinIO is the smallest thing that speaks enough of the protocol:
+
+```sh
+docker run -d --name qualityruntime-storage -p 9000:9000 -p 9001:9001 \
+  -e MINIO_ROOT_USER=qualityruntime -e MINIO_ROOT_PASSWORD=qualityruntime \
+  minio/minio server /data --console-address :9001
+
+docker run --rm --network host --entrypoint sh minio/mc -c \
+  "mc alias set local http://localhost:9000 qualityruntime qualityruntime \
+   && mc mb --ignore-existing local/qualityruntime"
+```
+
+The client is a second image rather than `docker exec` into the first, because the server image is not guaranteed to carry one. The values match `.env.example`, and the console is at `http://localhost:9001` if you want to look at what the runtime wrote.
+
 ```sh
 bun run dev   # http://localhost:3000, restarting on change
 ```
 
-It runs from the repository root so Bun loads the root `.env`, and it refuses to start when `DATABASE_URL`, `BETTER_AUTH_URL`, or `BETTER_AUTH_SECRET` is missing rather than failing on the first request that needs one.
+It runs from the repository root so Bun loads the root `.env`, and refuses to start when `DATABASE_URL`, any of the four required `STORAGE_*` settings, `BETTER_AUTH_URL`, or `BETTER_AUTH_SECRET` is missing. It also refuses to start when the bucket does not answer: a bucket that is not there is indistinguishable from every file having been deleted, and finding that out on the first download is worse than finding it out at start-up. It deliberately does not create the bucket — one the runtime made is one nobody has configured for retention, and bucket policy belongs to whoever owns the bucket.
 
-`apps/server` mounts [Better Auth](https://better-auth.com) at `/api/auth/*`, and this product's own API at `/api/v1`. Tenant-owned resources — controls, standards, requirements, evidence, and the history of what happened to them — sit under `/api/v1/organizations/:organizationId` behind `organizationContext`, which resolves the caller's membership and binds `withOrganization` to that organization ([ADR 0004](adr/0004-organization-in-the-request-path.md)); a route mounted outside that prefix has no `withOrganization` on its context and fails rather than serving unscoped rows. `apps/server/organization.test.ts` and `controls.test.ts` drive the stack over HTTP as a non-superuser role, so the policies apply there too; request bodies and query strings are validated with [Zod](https://zod.dev) through `validation.ts`, which owns what a rejection looks like, and collections are paged by cursor through `pagination.ts`, each naming the ordering it is read in ([ADR 0006](adr/0006-cursor-paged-collections.md), [ADR 0009](adr/0009-importing-a-standard.md)). `responses.ts` defines shared response envelopes and builds errors; resource modules define their response schemas, and handlers build successful responses. `openapi.ts` combines those schemas with operation metadata into the document served at `/api/v1/openapi.json` ([ADR 0007](adr/0007-openapi-from-the-schemas.md)). Adding a route means adding its operation there too — `openapi.test.ts` derives what the app serves and fails until the two agree. A mutating handler also records what changed through `c.var.audit`, on the same transaction as the change ([ADR 0005](adr/0005-audit-history.md)); `audit.test.ts` covers that, including that the history cannot be rewritten. `authOptions` in `apps/server/auth.ts` is the schema contract — it decides which tables exist, and `auth.test.ts` derives its expectations from that same object. Better Auth refuses to start when the Drizzle schema object disagrees with it; that check reads the schema in code, not the live database, so applying migrations is still on you.
+None of this is needed to run the tests. `bun run test` starts nothing: the suite runs the same `objectStoreInS3` a deployment runs, against an S3 that answers in memory (`apps/server/s3-in-memory.ts`), so signing, preconditions and the server-side copy are all exercised without a container.
+
+What that cannot prove is the other half of the conversation: a signature is only correct if a real server agrees, and `x-amz-copy-source-if-match` is a promise a provider either keeps or does not. `apps/server/storage-integration.test.ts` asks the same contract of a real store, skipped unless `TEST_STORAGE_ENDPOINT` names one — the arrangement the concurrency suite has with `TEST_DATABASE_URL`.
+
+Point it at something that speaks the whole subset, which is the trap: the lightweight S3 servers written for local testing mostly stop after `PutObject`, `GetObject` and presigning. This needs conditional `CopyObject`, `If-Match` on `GetObject`, `ListObjectsV2` with continuation tokens, and entity tags that survive all three. A store missing the conditional copy fails the suite outright, or — worse — accepts the copy, ignores the precondition, and passes while proving nothing.
+
+```sh
+TEST_STORAGE_ENDPOINT=http://localhost:9000 \
+TEST_STORAGE_BUCKET=qualityruntime \
+TEST_STORAGE_ACCESS_KEY_ID=qualityruntime \
+TEST_STORAGE_SECRET_ACCESS_KEY=qualityruntime \
+  bun run test
+```
+
+It wipes nothing: every key it touches is one it just created under an identifier of its own, and it removes them afterwards. CI runs it against MinIO, so a change that works only against the in-memory store does not pass.
+
+`apps/server` mounts [Better Auth](https://better-auth.com) at `/api/auth/*`, and this product's own API at `/api/v1`. Tenant-owned resources — controls, standards, requirements, evidence, and files — sit under `/api/v1/organizations/:organizationId` behind `organizationContext`, which resolves the caller's membership and binds `withOrganization` to that organization ([ADR 0004](adr/0004-organization-in-the-request-path.md)); a route mounted outside that prefix has no `withOrganization` on its context and fails rather than serving unscoped rows. `apps/server/organization.test.ts` and `controls.test.ts` drive the stack over HTTP as a non-superuser role, so the policies apply there too; request bodies and query strings are validated with [Zod](https://zod.dev) through `validation.ts`, which owns what a rejection looks like, and collections are paged by cursor through `pagination.ts`, each naming the ordering it is read in ([ADR 0006](adr/0006-cursor-paged-collections.md), [ADR 0009](adr/0009-importing-a-standard.md)). `responses.ts` defines shared response envelopes and builds errors; resource modules define their response schemas, and handlers build successful responses. `openapi.ts` combines those schemas with operation metadata into the document served at `/api/v1/openapi.json` ([ADR 0007](adr/0007-openapi-from-the-schemas.md)). Adding a route means adding its operation there too — `openapi.test.ts` derives what the app serves and fails until the two agree. A mutating handler also records what changed through `c.var.audit`, on the same transaction as the change ([ADR 0005](adr/0005-audit-history.md)); `audit.test.ts` covers that, including that the history cannot be rewritten. `authOptions` in `apps/server/auth.ts` is the schema contract — it decides which tables exist, and `auth.test.ts` derives its expectations from that same object. Better Auth refuses to start when the Drizzle schema object disagrees with it; that check reads the schema in code, not the live database, so applying migrations is still on you.
+
+## Attaching a file
+
+Your bytes never pass through the API, so attaching one takes three requests ([ADR 0021](adr/0021-file-bytes-in-object-storage.md)). This is the whole of it, against a server running as above, and it is the shape a CI job takes — an SBOM, a test report, a vulnerability scan — as much as a browser's. `$SESSION` is the cookie sign-in answered with, `$ORGANIZATION` the tenant you are acting in, and `$EVIDENCE` a record you have already created:
+
+```sh
+api=http://localhost:3000/api/v1/organizations/$ORGANIZATION
+auth="cookie: $SESSION"
+
+# 1. Ask. The runtime authorizes it and answers with somewhere to send bytes.
+upload=$(curl -fsS "$api/evidence/$EVIDENCE/file-uploads" \
+  -H "$auth" -H 'content-type: application/json' \
+  -d '{"filename":"sbom.cdx.json","contentType":"application/json"}')
+
+# 2. Send them, straight to the store. The URL carries its own authorization,
+#    so this request has no session on it and never reaches the API.
+curl -fsS --upload-file sbom.cdx.json "$(jq -r .data.upload.url <<<"$upload")"
+
+# 3. Complete it. The runtime checks what the store actually holds and attaches
+#    it, answering with the file. Safe to repeat.
+curl -fsS -X PUT "$api/file-uploads/$(jq -r .data.id <<<"$upload")/completion" -H "$auth"
+```
+
+Three things are worth knowing before building on it:
+
+**Step three is idempotent.** It is keyed on the upload identifier the first call answered with, which the client already holds. A pipeline that loses the response to step three and retries gets the same file back rather than attaching a second one — which is the property that makes this usable from CI at all.
+
+**Nothing has to be computed in advance.** `contentType` is optional and `bytes` is optional; supplying `bytes` only buys a refusal before a URL is issued rather than after the upload. The size and the SHA-256 that end up on the record are the ones the server reads back from the store, never anything the client declared. A file may be up to 25 MiB and a piece of evidence may carry twenty of them — the published schema at `/api/v1/openapi.json` is where the first of those is stated for a client to read.
+
+**Downloading is one request that redirects, and following it needs care.** The runtime resolves the file in your tenant and answers `303` to a URL good for a minute:
+
+```sh
+url=$(curl -fsS -o /dev/null -w '%{redirect_url}' "$api/files/$FILE" -H "$auth")
+curl -fsS "$url" -o sbom.cdx.json
+```
+
+Two requests rather than `curl -L`, deliberately. `curl` re-sends a header given with `-H` to whatever host a redirect points at, so `-L` here would put your session cookie in the object store's access log — and the store is frequently somebody else's. The redirect target needs no session: the URL carries its own authorization, which is the same reason it is short-lived and not worth keeping. A browser is safe for a different reason than it looks — not because MinIO is another origin, but because the session cookie carries `Path=/api` ([security](security.md)).
+
+## Checking stored files
+
+See [deployment](deployment.md#checking-stored-files) for `bun run verify:files`, its limits, and interpreting findings, and [reclaiming unclaimed bytes](deployment.md#reclaiming-unclaimed-bytes) for `bun run reclaim:storage`. `apps/server/integrity.ts` and `reclaim.ts` implement the two directions independently of HTTP; `verify-files.ts` and `reclaim-storage.ts` supply the database connection and the object store.
+
+`reclaim.ts` is the only code here that deletes evidence bytes, so `reclaim.test.ts` spends most of its length on what it must _not_ remove, and each of those guards is checked by deleting it and watching a test fail. That suite runs as a non-superuser role for the reason `enforcement.test.ts` does: a sweep that read only one tenant's rows would call every other tenant's files unclaimed, and against PGlite's superuser connection that bug is invisible.
 
 ## Testing races
 

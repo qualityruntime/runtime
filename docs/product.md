@@ -40,7 +40,7 @@ These are not aspirations. Each one is already a decision somewhere in `docs/adr
 
 **Model small, and add when something needs it.** Every entity here is narrower than a quality system eventually wants: no owner on a control, no rationale on a mapping, no validity period on evidence. A field added when a workflow needs it is cheaper than one that turned out to mean the wrong thing. The absences are deliberate and written down.
 
-**Make self-hosting boring.** PostgreSQL, and nothing else mandatory: no queue, no object store, no search cluster, no second service to operate. Anything that would become mandatory has to earn it.
+**Make self-hosting boring.** PostgreSQL and a directory. No queue, no object store, no search cluster, no second service to operate. Anything that would become mandatory has to earn it.
 
 **Be readable by a program.** The API describes itself, the identifiers say what they are, the errors carry codes, and the collections page the same way. An AI agent should be able to work the product from its own description, without a human explaining the conventions first.
 
@@ -76,7 +76,7 @@ A managed service is planned, and what belongs to it is the operation rather tha
 
 ## Status
 
-The loop exists end to end: standards can be imported, controls recorded and mapped to the requirements they answer, evidence recorded and attested, and domain API mutations are audited. Files cannot yet be attached to evidence. Better Auth operations and cascades PostgreSQL performs do not write domain audit events; `docs/data-model.md` describes the audit model.
+The loop exists end to end: standards can be imported, controls recorded and mapped to the requirements they answer, evidence recorded and attested with files attached, and domain API mutations are audited. Better Auth operations and cascades PostgreSQL performs do not write domain audit events; `docs/data-model.md` describes the audit model.
 
 A draft control with no evidence can be discarded, and so can unattested evidence. A control that took effect is retired rather than removed, and attested evidence stays. That history is readable on its own, and outlives the records it describes.
 

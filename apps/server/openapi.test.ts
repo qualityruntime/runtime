@@ -11,6 +11,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+
 import { PGlite } from "@electric-sql/pglite";
 import { schema } from "@qualityruntime/db";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -19,6 +20,7 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { createApp } from "./app.ts";
 import { createAuth } from "./auth.ts";
+import { inMemoryObjectStore } from "./s3-in-memory.ts";
 import { sessionCookieName } from "./auth.ts";
 import { openApiDocument, openApiPath, referencePath } from "./openapi.ts";
 
@@ -100,6 +102,7 @@ beforeAll(async () => {
   });
   app = createApp({
     db,
+    store: inMemoryObjectStore().store,
     auth,
   });
 
@@ -199,6 +202,19 @@ describe("the document", () => {
     expect(cursor?.schema.type).toBe("string");
   });
 
+  it("explains the upload sequence in the document, not only in this repository", () => {
+    // Three requests to attach one file is the least obvious thing this API
+    // asks of a client, and a summary has no room to say why. The explanation
+    // is worth nothing if the generated document drops it.
+    const document = openApiDocument(sessionCookieName(auth));
+    const prepare = document.paths[
+      "/api/v1/organizations/{organizationId}/evidence/{evidenceId}/file-uploads"
+    ]!.post as { description?: string; requestBody?: unknown };
+
+    expect(prepare.description).toMatch(/three requests/i);
+    expect(prepare.requestBody).toBeTruthy();
+  });
+
   it("documents looking a requirement up by the reference people cite", () => {
     const document = openApiDocument(sessionCookieName(auth));
     const list = document.paths[
@@ -263,6 +279,26 @@ describe("the requests it promises to accept", () => {
 
     expect(validate(body)).toBe(false);
     expect((await request("", { method: "POST", body: JSON.stringify(body) })).status).toBe(400);
+  });
+
+  it.each([
+    ["a header injection", "text/plain\r\nX-Injected: 1"],
+    ["something that is not a media type", "not a media type"],
+    ["a type with no subtype", "application"],
+  ])("publishes a schema that refuses %s as a content type", (_case, contentType) => {
+    // The server refuses these, and the database refuses them after that. A
+    // constraint that survives into the server but not into the document is
+    // the failure ADR 0007 exists to prevent — and this one is a `regex`
+    // precisely because a `refine` converts to nothing at all.
+    const prepare = "/api/v1/organizations/{organizationId}/evidence/{evidenceId}/file-uploads";
+    const post = openApiDocument(sessionCookieName(auth)).paths[prepare]!.post as {
+      requestBody: { content: Record<string, { schema: { properties: Record<string, object> } }> };
+    };
+    const published = post.requestBody.content["application/json"]!.schema.properties.contentType;
+
+    const validate = ajv.compile(published!);
+    expect(validate(contentType)).toBe(false);
+    expect(validate("application/pdf")).toBe(true);
   });
 
   it.each([

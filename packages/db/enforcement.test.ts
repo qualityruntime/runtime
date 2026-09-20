@@ -25,6 +25,7 @@ import {
   controlRequirement,
   evidence,
   file,
+  fileUpload,
   organization,
   requirement,
   standard,
@@ -106,6 +107,12 @@ const restrictViolation = "23001";
 
 /** PostgreSQL's code for a CHECK constraint refusing a row. */
 const checkViolation = "23514";
+
+/** PostgreSQL's code for a foreign key with nothing to point at. */
+const foreignKeyViolation = "23503";
+
+/** PostgreSQL's code for a row a policy's `WITH CHECK` would not admit. */
+const policyViolation = "42501";
 
 /** Rows of `control` the current role can see, whatever tenant they belong to. */
 const visibleControls = () => db.select().from(control);
@@ -550,6 +557,333 @@ describe("attachments", () => {
       tx.select().from(file).where(eq(file.id, attached!.id)),
     );
     expect(kept).toHaveLength(1);
+  });
+});
+
+describe("upload intents", () => {
+  /** Evidence on tenant A's control, and an upload prepared against it. */
+  const newEvidence = () =>
+    withOrganization(db, tenantA, async (tx) => {
+      const [row] = await tx
+        .insert(evidence)
+        .values({
+          organizationId: tenantA,
+          controlId: controlA,
+          title: "Minutes",
+          occurredAt: new Date(),
+        })
+        .returning();
+      return row!.id;
+    });
+
+  const inAnHour = () => new Date(Date.now() + 60 * 60 * 1000);
+  const anHourAgo = () => new Date(Date.now() - 60 * 60 * 1000);
+
+  const prepare = async (evidenceId: string, expiresAt = inAnHour()) => {
+    const [row] = await withOrganization(db, tenantA, (tx) =>
+      tx
+        .insert(fileUpload)
+        .values({
+          organizationId: tenantA,
+          evidenceId,
+          filename: "minutes.pdf",
+          contentType: "application/pdf",
+          expiresAt,
+        })
+        .returning(),
+    );
+    return row!;
+  };
+
+  /** The file a completion would attach, written as the completion writes it. */
+  const attach = (evidenceId: string) =>
+    withOrganization(db, tenantA, async (tx) => {
+      const [row] = await tx
+        .insert(file)
+        .values({
+          organizationId: tenantA,
+          evidenceId,
+          filename: "minutes.pdf",
+          contentType: "application/pdf",
+          bytes: 1,
+          checksum: "a".repeat(64),
+        })
+        .returning();
+      return row!.id;
+    });
+
+  /** Completion: claims the upload for a file, if nothing claimed it first. */
+  const complete = (uploadId: string, fileId: string) =>
+    withOrganization(db, tenantA, (tx) =>
+      tx.update(fileUpload).set({ fileId }).where(eq(fileUpload.id, uploadId)).returning(),
+    );
+
+  /**
+   * The passage of time, as the superuser.
+   *
+   * No policy admits this: a completed upload cannot be updated at all, which
+   * is the point of the tests below. So it is done from outside them rather
+   * than by waiting for an hour.
+   */
+  const age = async (uploadId: string) => {
+    await db.$client.exec("reset role;");
+    await db.$client.query(`update "file_upload" set "expires_at" = $1 where "id" = $2`, [
+      anHourAgo(),
+      uploadId,
+    ]);
+    await db.$client.exec(`set role ${applicationRole};`);
+  };
+
+  it("are prepared against this tenant's own evidence", async () => {
+    const upload = await prepare(await newEvidence());
+
+    expect(upload.id).toMatch(/^upl_[0-9a-z]{16}$/);
+    expect(upload.fileId).toBeNull();
+  });
+
+  it("are invisible to another tenant, which cannot complete one", async () => {
+    const evidenceId = await newEvidence();
+    const upload = await prepare(evidenceId);
+    const fileId = await attach(evidenceId);
+
+    const seen = await withOrganization(db, tenantB, (tx) =>
+      tx.select().from(fileUpload).where(eq(fileUpload.id, upload.id)),
+    );
+    // A real file, so nothing but the policy stands between this and a
+    // completed upload in someone else's tenant.
+    const claimed = await withOrganization(db, tenantB, (tx) =>
+      tx.update(fileUpload).set({ fileId }).where(eq(fileUpload.id, upload.id)).returning(),
+    );
+
+    // Indistinguishable from an upload that was never prepared.
+    expect(seen).toEqual([]);
+    expect(claimed).toEqual([]);
+  });
+
+  it("cannot be prepared against another organization's evidence", async () => {
+    const evidenceId = await newEvidence();
+
+    const smuggled = withOrganization(db, tenantB, (tx) =>
+      tx.insert(fileUpload).values({
+        organizationId: tenantB,
+        evidenceId,
+        filename: "smuggled.pdf",
+        contentType: "application/pdf",
+        expiresAt: inAnHour(),
+      }),
+    );
+
+    // The composite reference refuses it. There is no trigger here, and
+    // deliberately so: asking whether the evidence is open would mean locking
+    // it, which preparing an upload must not do.
+    expect(await rejectedWith(smuggled)).toBe(foreignKeyViolation);
+  });
+
+  it("do not stop the evidence being attested", async () => {
+    // Preparing an upload is permission to attempt one, never a claim on a
+    // slot. Evidence with an upload outstanding is as final as any other, and
+    // the completion is what fails.
+    const evidenceId = await newEvidence();
+    await prepare(evidenceId);
+
+    const attested = await withOrganization(db, tenantA, (tx) =>
+      tx
+        .update(evidence)
+        .set({ attestedAt: new Date(), attestedById: createId("user"), attestedByLabel: "Ada" })
+        .where(eq(evidence.id, evidenceId))
+        .returning(),
+    );
+
+    expect(attested).toHaveLength(1);
+  });
+
+  it("name their file once, and a second completion claims nothing", async () => {
+    const evidenceId = await newEvidence();
+    const upload = await prepare(evidenceId);
+
+    const first = await complete(upload.id, await attach(evidenceId));
+    const second = await complete(upload.id, await attach(evidenceId));
+
+    expect(first).toHaveLength(1);
+    // Matched nothing rather than overwrote: the row is closed to updates, so
+    // a retry reads the file the first completion made instead of a second one.
+    expect(second).toEqual([]);
+  });
+
+  it("are closed to every other change once completed", async () => {
+    const evidenceId = await newEvidence();
+    const upload = await prepare(evidenceId);
+    await complete(upload.id, await attach(evidenceId));
+
+    const renamed = await withOrganization(db, tenantA, (tx) =>
+      tx
+        .update(fileUpload)
+        .set({ filename: "something-else.pdf" })
+        .where(eq(fileUpload.id, upload.id))
+        .returning(),
+    );
+
+    expect(renamed).toEqual([]);
+  });
+
+  it("cannot name another organization's file", async () => {
+    const upload = await prepare(await newEvidence());
+    const theirs = await withOrganization(db, tenantB, async (tx) => {
+      const [row] = await tx
+        .insert(control)
+        .values({ organizationId: tenantB, name: "Supplier audit" })
+        .returning();
+      const [record] = await tx
+        .insert(evidence)
+        .values({
+          organizationId: tenantB,
+          controlId: row!.id,
+          title: "Minutes",
+          occurredAt: new Date(),
+        })
+        .returning();
+      const [attached] = await tx
+        .insert(file)
+        .values({
+          organizationId: tenantB,
+          evidenceId: record!.id,
+          filename: "theirs.pdf",
+          contentType: "application/pdf",
+          bytes: 1,
+          checksum: "b".repeat(64),
+        })
+        .returning();
+      return attached!.id;
+    });
+
+    // The composite reference is what makes this impossible rather than merely
+    // unwritten: `file_id` alone would have matched (TENANT-01).
+    expect(await rejectedWith(complete(upload.id, theirs))).toBe(foreignKeyViolation);
+  });
+
+  it("cannot name this tenant's own file attached to other evidence", async () => {
+    // The tenant is right and the file is real, so nothing but the reference
+    // itself catches this. It matters because of what completion is for: a
+    // retry reads `file_id` and answers with that file, so a row pointing at
+    // the wrong evidence would answer a retry of upload A with evidence B's
+    // attachment, and every check above would still be satisfied.
+    const upload = await prepare(await newEvidence());
+    const elsewhere = await attach(await newEvidence());
+
+    expect(await rejectedWith(complete(upload.id, elsewhere))).toBe(foreignKeyViolation);
+  });
+
+  it("cannot carry a filename longer than its byte budget", async () => {
+    // The route refuses this with a 400; this is the guarantee behind it. The
+    // bound is bytes because the name goes into `Content-Disposition` twice at
+    // promotion, and AWS counts that header against a 2 KiB metadata budget —
+    // so 255 characters of CJK is a copy S3 rejects, after the bytes have been
+    // uploaded and copied (ADR 0021).
+    const evidenceId = await newEvidence();
+    const tooLong = (name: string) =>
+      withOrganization(db, tenantA, (tx) =>
+        tx
+          .insert(fileUpload)
+          .values({
+            organizationId: tenantA,
+            evidenceId,
+            filename: name,
+            contentType: "application/pdf",
+            expiresAt: inAnHour(),
+          })
+          .returning(),
+      );
+
+    // 85 characters, 255 bytes: the same name one character longer does not fit.
+    expect(await tooLong("監".repeat(85))).toHaveLength(1);
+    expect(await rejectedWith(tooLong("監".repeat(86)))).toBe(checkViolation);
+  });
+
+  it("cannot be prepared already naming a file", async () => {
+    // The whole lifecycle is null → file, governed by the policies below and
+    // by the runtime holding `UPDATE` on that one column. A row inserted with
+    // it already set would have gone around all of it.
+    const evidenceId = await newEvidence();
+    const fileId = await attach(evidenceId);
+
+    const refused = withOrganization(db, tenantA, (tx) =>
+      tx
+        .insert(fileUpload)
+        .values({
+          organizationId: tenantA,
+          evidenceId,
+          fileId,
+          filename: "minutes.pdf",
+          contentType: "application/pdf",
+          expiresAt: inAnHour(),
+        })
+        .returning(),
+    );
+
+    expect(await rejectedWith(refused)).toBe(policyViolation);
+  });
+
+  it("cannot be completed once the window they were given has closed", async () => {
+    // The handler checks this before it touches the object store, and cannot
+    // hold it: reading, hashing and copying 25 MiB happens afterwards, with no
+    // row held. So the deadline the API advertises is kept here, and this is
+    // the exact complement of the reclaim test below — a row a sweep may take
+    // is one no completion could still have used.
+    const evidenceId = await newEvidence();
+    const late = await prepare(evidenceId, anHourAgo());
+
+    expect(await complete(late.id, await attach(evidenceId))).toEqual([]);
+  });
+
+  it("cannot be completed by a transaction that started in time and waited", async () => {
+    // `now()` is the transaction's start time and does not move, so a policy
+    // written with it would admit an upload that ran out while the transaction
+    // waited for the evidence lock. The completion takes that lock first, so
+    // the wait is real. `clock_timestamp()` is what makes the window close
+    // during a transaction as well as between them.
+    const evidenceId = await newEvidence();
+    const closing = await prepare(evidenceId, new Date(Date.now() + 100));
+    const fileId = await attach(evidenceId);
+
+    const claimed = await withOrganization(db, tenantA, async (tx) => {
+      await tx.execute(sql`select pg_sleep(0.3)`);
+      return tx.update(fileUpload).set({ fileId }).where(eq(fileUpload.id, closing.id)).returning();
+    });
+
+    expect(claimed).toEqual([]);
+  });
+
+  it("are reclaimed only once expired, and never once completed", async () => {
+    const evidenceId = await newEvidence();
+    const live = await prepare(evidenceId);
+    const abandoned = await prepare(evidenceId, anHourAgo());
+    const done = await prepare(evidenceId);
+    await complete(done.id, await attach(evidenceId));
+    await age(done.id);
+
+    const reclaim = (id: string) =>
+      withOrganization(db, tenantA, (tx) =>
+        tx.delete(fileUpload).where(eq(fileUpload.id, id)).returning(),
+      );
+
+    expect(await reclaim(live.id)).toEqual([]);
+    expect(await reclaim(abandoned.id)).toHaveLength(1);
+    // Removing it would make a retry of a completed upload attach a second file.
+    expect(await reclaim(done.id)).toEqual([]);
+  });
+
+  it("go when the evidence they were for is discarded", async () => {
+    const evidenceId = await newEvidence();
+    const upload = await prepare(evidenceId);
+
+    await withOrganization(db, tenantA, (tx) =>
+      tx.delete(evidence).where(eq(evidence.id, evidenceId)),
+    );
+
+    const left = await withOrganization(db, tenantA, (tx) =>
+      tx.select().from(fileUpload).where(eq(fileUpload.id, upload.id)),
+    );
+    expect(left).toEqual([]);
   });
 });
 

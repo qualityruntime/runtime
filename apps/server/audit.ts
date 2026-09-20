@@ -35,7 +35,8 @@ type Records = { resourceType: ResourceType; resourceId: string };
  * a deletion an `after`, and nothing would object.
  *
  * `updated` keeps `before` optional because not every change is a replacement:
- * one that only adds something has no previous value to name.
+ * attaching a file to evidence adds something that was not there, and has no
+ * previous value to name.
  */
 export type Change = Records &
   (

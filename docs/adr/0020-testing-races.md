@@ -39,7 +39,7 @@ The locks are now load-bearing in a way that can be checked. Removing `FOR UPDAT
 
 **It kept finding things.** A second round added the same foreign-key race one level down — attaching a file read its evidence unlocked and took the key share only at the insert, so a discard landing in between made it a `500`. Fixing that introduced a regression of its own, caught by review rather than by the suite: a locked read is governed by the `UPDATE` policy, which sees only unattested rows, so evidence attested mid-upload came back as "does not exist" rather than "already attested". The same trap this file warns about two paragraphs above, walked into while fixing something else.
 
-Revoking the audit insert privilege during an upload verifies transaction rollback and byte cleanup. The handler lets that failure reach the API's internal-error response rather than interpreting it as a concurrent attestation; attestation and deletion conflicts are resolved by reading evidence state under the lock, with an unlocked re-read if the locked read returns nothing.
+Revoking the audit insert privilege during an upload verifies transaction rollback, and that the bytes promoted before it are kept as a recoverable orphan and reclaimed by a later sweep rather than removed on a guess. The handler lets that failure reach the API's internal-error response rather than interpreting it as a concurrent attestation; attestation and deletion conflicts are resolved by reading evidence state under the lock, with an unlocked re-read if the locked read returns nothing.
 
 **It found a third defect, in the race it was written to prove.** [ADR 0013](0013-durable-storage.md) argued that recording evidence and discarding its control cannot interleave, because the foreign key check takes `FOR KEY SHARE` and the discard holds `FOR UPDATE`. True as far as it went — but the recording read its control _without_ a lock and took the key share only at the insert, so a discard landing in between turned it into a foreign key violation and a `500`. It now takes that lock on the read and holds it, which makes the loser lose cleanly: `404` if the control went, `409 has_evidence` if the evidence did.
 
@@ -53,7 +53,7 @@ It is ambiguous **exactly where the policy governing the locking command restric
 
 Discarding a control is sound for a different reason. Its `DELETE` policy _does_ restrict which rows exist, but the row is locked first, so a delete matching nothing can only mean the predicate refused it — never that somebody else got there.
 
-**Not everything is covered.** Nothing yet covers connection exhaustion, a request cancelled mid-transaction, or two organizations contending for the same row — which cannot happen, since no row belongs to two.
+**Not everything is covered.** The upload test sends eight slow uploads through a two-connection pool to check that storage writes do not hold connections. This covers one source of pool exhaustion, not arbitrary overload. Request cancellation mid-transaction remains untested. Domain rows belong to one organization, so the suite does not model two tenants legitimately writing the same row.
 
 **CI runs it.** The `check` job takes a `postgres:18` service and sets `TEST_DATABASE_URL`, so a change that breaks a lock fails there rather than for whoever runs the suite next. That the setup works from nothing — no schema, no role, no rows — is checked by running it against a database created for the purpose, which is CI's situation exactly.
 

@@ -148,6 +148,26 @@ async function refuse(what: string, response: Response): Promise<never> {
   );
 }
 
+/**
+ * The entity tag a `CopyObjectResult` names, spelled as HTTP spells one.
+ *
+ * Providers disagree on the XML: an entity tag contains quotes, AWS escapes
+ * them `&quot;`, and MinIO's Go encoder writes `&#34;` for the same character.
+ * This value goes straight back out as `If-Match`, so an undecoded one is a
+ * precondition that cannot match and a promotion that cannot be read back.
+ *
+ * Re-quoted rather than passed through, because an entity tag is quoted
+ * (RFC 9110) and a provider that omits them would otherwise send a bare token.
+ */
+function entityTagIn(body: string): string | undefined {
+  const raw = body.match(/<CopyObjectResult[\s\S]*?<ETag>([^<]+)<\/ETag>/)?.[1];
+  if (!raw) return undefined;
+  // `&amp;` last: decoding it first would turn `&amp;quot;` into a quote.
+  const decoded = raw.replaceAll("&quot;", '"').replaceAll("&#34;", '"').replaceAll("&amp;", "&");
+  const inner = /^"(.*)"$/.exec(decoded.trim())?.[1] ?? decoded.trim();
+  return inner ? `"${inner}"` : undefined;
+}
+
 /** Releases a response whose body is not going to be read. */
 const drop = (response: Response) => response.body?.cancel().catch(() => undefined);
 
@@ -256,13 +276,11 @@ export function objectStoreInS3(configuration: S3Configuration): ObjectStore {
       // an object never written. The tag in that body is the destination's, so
       // reading it out is both the proof it finished and what callers pin to.
       const body = await response.text();
-      const entityTag = body.match(/<CopyObjectResult[\s\S]*?<ETag>([^<]+)<\/ETag>/)?.[1];
+      const entityTag = entityTagIn(body);
       if (!entityTag) {
         throw new Error(`copy ${from} to ${to} failed after answering 200. ${body.slice(0, 500)}`);
       }
-      // The quotes are part of an entity tag, and XML escapes them:
-      // `&quot;abc&quot;` has to be `"abc"` again to match on a GET.
-      return { entityTag: entityTag.replaceAll("&quot;", '"').trim() };
+      return { entityTag };
     },
 
     async *list(prefix) {

@@ -336,6 +336,37 @@ describe("promoting", () => {
     expect(objects.get(file)!.cacheControl).toBe("private, no-store");
   });
 
+  it.each([
+    ["AWS, which escapes the quotes", "&quot;9bb58f26&quot;"],
+    // Go's `encoding/xml` writes this for the same character, and a tag left
+    // undecoded goes back out as an `If-Match` that cannot match — MinIO
+    // answers 412 and a promotion becomes unreadable.
+    ["MinIO, whose encoder writes the numeric reference", "&#34;9bb58f26&#34;"],
+    ["a provider that escapes nothing", '"9bb58f26"'],
+    ["a provider that omits the quotes an entity tag has", "9bb58f26"],
+    ["one that wrapped it in whitespace", "\n  &quot;9bb58f26&quot;\n"],
+  ])("reads the tag out of a copy answered by %s", async (_case, spelling) => {
+    const s3 = inMemoryS3();
+    const store = objectStoreInS3({
+      ...s3.configuration,
+      fetch: async () =>
+        new Response(
+          `<?xml version="1.0" encoding="UTF-8"?>` +
+            `<CopyObjectResult><ETag>${spelling}</ETag></CopyObjectResult>`,
+          { status: 200, headers: { "content-type": "application/xml" } },
+        ),
+    });
+
+    const promoted = await store.promote(uploadKey(anUploadId()), fileKey(createId("file")), {
+      matching: '"whatever"',
+      filename: "minutes.pdf",
+    });
+
+    // Quoted, whatever the provider sent: this is handed straight to
+    // `If-Match`, where a bare token is not an entity tag at all (RFC 9110).
+    expect(promoted.entityTag).toBe('"9bb58f26"');
+  });
+
   it("keeps a name that is not ASCII, rather than mangling it", async () => {
     // The fallback is all a header may safely carry, and on its own it turns
     // every non-Latin name into underscores. `filename*` is the one clients

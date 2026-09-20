@@ -238,6 +238,12 @@ describe.skipIf(!usable)("a real S3-compatible store", () => {
     // provider-dependent one — a tag spelled by `CopyObjectResult` and handed
     // straight back as `If-Match` on a `GET` — and it is what stops bytes
     // written between the two from becoming the baseline.
+    // Asserted before it is used as a precondition: providers spell the tag in
+    // `CopyObjectResult` differently from the one on a `HEAD` — AWS escapes the
+    // quotes, MinIO's encoder writes `&#34;` — and a mismatch here says which
+    // two strings disagree, where the conditional read below would only answer
+    // 412.
+    expect(copy.entityTag).toBe((await store.inspect(permanent))!.entityTag);
     const written = await measure((await store.read(permanent, { matching: copy.entityTag }))!);
     expect(written.bytes).toBe(packed.length);
     expect(written.checksum).toBe(await checksumIn(streamOfBytes(packed)));

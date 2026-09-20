@@ -179,11 +179,29 @@ CREATE TABLE "file" (
 	"bytes" integer NOT NULL,
 	"checksum" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "file_id_evidence_id_organization_id_key" UNIQUE("id","evidence_id","organization_id"),
 	CONSTRAINT "file_id_format" CHECK ("id" ~ '^fil_[0-9a-z]{16}$'),
 	CONSTRAINT "file_filename_present" CHECK ("file"."filename" ~ '[^[:space:]]'),
+	CONSTRAINT "file_filename_bytes" CHECK (octet_length("file"."filename") <= 255),
 	CONSTRAINT "file_content_type_shape" CHECK ("content_type" ~ '^[A-Za-z0-9!#$%&*+.^_|~-]+/[A-Za-z0-9!#$%&*+.^_|~-]+$'),
 	CONSTRAINT "file_bytes_positive" CHECK ("file"."bytes" > 0),
 	CONSTRAINT "file_checksum_is_sha256" CHECK ("file"."checksum" ~ '^[0-9a-f]{64}$')
+);
+--> statement-breakpoint
+CREATE TABLE "file_upload" (
+	"id" text PRIMARY KEY NOT NULL,
+	"organization_id" text NOT NULL,
+	"evidence_id" text NOT NULL,
+	"filename" text NOT NULL,
+	"content_type" text NOT NULL,
+	"expires_at" timestamp with time zone NOT NULL,
+	"file_id" text,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "file_upload_file_id_key" UNIQUE("file_id"),
+	CONSTRAINT "file_upload_id_format" CHECK ("id" ~ '^upl_[0-9a-z]{16}$'),
+	CONSTRAINT "file_upload_filename_present" CHECK ("file_upload"."filename" ~ '[^[:space:]]'),
+	CONSTRAINT "file_upload_filename_bytes" CHECK (octet_length("file_upload"."filename") <= 255),
+	CONSTRAINT "file_upload_content_type_shape" CHECK ("content_type" ~ '^[A-Za-z0-9!#$%&*+.^_|~-]+/[A-Za-z0-9!#$%&*+.^_|~-]+$')
 );
 --> statement-breakpoint
 CREATE TABLE "control_requirement" (
@@ -236,6 +254,8 @@ ALTER TABLE "control" ADD CONSTRAINT "control_organization_id_organization_id_fk
 ALTER TABLE "evidence" ADD CONSTRAINT "evidence_organization_id_organization_id_fk" FOREIGN KEY ("organization_id") REFERENCES "public"."organization"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "evidence" ADD CONSTRAINT "evidence_control_fk" FOREIGN KEY ("control_id","organization_id") REFERENCES "public"."control"("id","organization_id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "file" ADD CONSTRAINT "file_evidence_fk" FOREIGN KEY ("evidence_id","organization_id") REFERENCES "public"."evidence"("id","organization_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "file_upload" ADD CONSTRAINT "file_upload_evidence_fk" FOREIGN KEY ("evidence_id","organization_id") REFERENCES "public"."evidence"("id","organization_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "file_upload" ADD CONSTRAINT "file_upload_file_fk" FOREIGN KEY ("file_id","evidence_id","organization_id") REFERENCES "public"."file"("id","evidence_id","organization_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "control_requirement" ADD CONSTRAINT "control_requirement_control_fk" FOREIGN KEY ("control_id","organization_id") REFERENCES "public"."control"("id","organization_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "control_requirement" ADD CONSTRAINT "control_requirement_requirement_fk" FOREIGN KEY ("requirement_id","organization_id") REFERENCES "public"."requirement"("id","organization_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "requirement" ADD CONSTRAINT "requirement_standard_fk" FOREIGN KEY ("standard_id","organization_id") REFERENCES "public"."standard"("id","organization_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -257,6 +277,8 @@ CREATE INDEX "verification_identifier_idx" ON "verification" USING btree ("ident
 CREATE INDEX "control_organization_id_created_at_id_idx" ON "control" USING btree ("organization_id","created_at","id");--> statement-breakpoint
 CREATE INDEX "evidence_organization_id_control_id_occurred_at_id_idx" ON "evidence" USING btree ("organization_id","control_id","occurred_at","id");--> statement-breakpoint
 CREATE INDEX "file_organization_id_evidence_id_created_at_id_idx" ON "file" USING btree ("organization_id","evidence_id","created_at","id");--> statement-breakpoint
+CREATE INDEX "file_upload_organization_id_expires_at_idx" ON "file_upload" USING btree ("organization_id","expires_at") WHERE "file_upload"."file_id" is null;--> statement-breakpoint
+CREATE INDEX "file_upload_evidence_id_organization_id_idx" ON "file_upload" USING btree ("evidence_id","organization_id");--> statement-breakpoint
 CREATE INDEX "control_requirement_organization_id_requirement_id_idx" ON "control_requirement" USING btree ("organization_id","requirement_id","control_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "requirement_standard_id_reference_uidx" ON "requirement" USING btree ("standard_id","reference");--> statement-breakpoint
 CREATE INDEX "requirement_organization_id_standard_id_position_id_idx" ON "requirement" USING btree ("organization_id","standard_id","position","id");--> statement-breakpoint

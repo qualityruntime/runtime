@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: 2026 Quality Runtime contributors
+# SPDX-License-Identifier: Apache-2.0
+
+name: Storage compatibility
+
+# The question `ci.yml` cannot ask. It runs `storage-integration.test.ts`
+# against MinIO on every push, which settles what this product signs and sends
+# and nothing about any other provider — and one precondition is load-bearing:
+# a store that accepted `x-amz-copy-source-if-match` and ignored it would
+# promote bytes the client swapped for the ones inspected (ADR 0021).
+# Only the provider can answer that, on its release cadence rather than ours.
+#
+# Separate from `ci.yml` because repository secrets are withheld from a pull
+# request opened from a fork, so a credentialed job there would skip on exactly
+# the contributions most worth checking — and skip *silently*, since the suite
+# skips without an endpoint. A green tick for a question nobody asked is worse
+# than no job, which is why the endpoint is checked below.
+#
+# The jobs here are the compatibility claim. Naming a provider in
+# `docs/deployment.md` as an example of an S3-compatible configuration is not
+# one; calling it supported is, and that needs a job here — or, for MinIO, the
+# run `ci.yml` already makes.
+
+on:
+  schedule:
+    # Weekly: nothing else notices a provider changing, and a daily green tick
+    # is one people stop reading. GitHub disables a schedule after 60 days
+    # without repository activity, so one gone quiet means the schedule.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  r2:
+    name: Cloudflare R2
+    runs-on: ubuntu-latest
+    # One at a time. `ci.yml` starts a container and throws it away; this
+    # writes to a bucket that is shared, durable and outside this repository.
+    concurrency: storage-compatibility-r2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - run: bun install --frozen-lockfile
+
+      # Without an endpoint the suite skips every case and passes having asked
+      # nothing. The other settings it demands itself.
+      - name: Refuse to pass without credentials
+        env:
+          endpoint: ${{ secrets.R2_STORAGE_ENDPOINT }}
+        run: |
+          if [ -z "$endpoint" ]; then
+            echo "R2_STORAGE_ENDPOINT is not set, so this run would prove nothing."
+            echo "Set it, R2_STORAGE_BUCKET, R2_STORAGE_ACCESS_KEY_ID and"
+            echo "R2_STORAGE_SECRET_ACCESS_KEY, or delete this job."
+            exit 1
+          fi
+
+      # Only this suite, so a failure means the store and nothing else. Point
+      # it at a dedicated, empty bucket: the suite removes the keys it creates,
+      # but it lists `files/` to the end.
+      - run: bun run test apps/server/storage-integration.test.ts
+        env:
+          TEST_STORAGE_ENDPOINT: ${{ secrets.R2_STORAGE_ENDPOINT }}
+          TEST_STORAGE_BUCKET: ${{ secrets.R2_STORAGE_BUCKET }}
+          # R2 accepts one region, and a signature is computed against it.
+          TEST_STORAGE_REGION: auto
+          TEST_STORAGE_ACCESS_KEY_ID: ${{ secrets.R2_STORAGE_ACCESS_KEY_ID }}
+          TEST_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.R2_STORAGE_SECRET_ACCESS_KEY }}

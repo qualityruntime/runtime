@@ -1,5 +1,5 @@
 {
-  "id": "a0fc0c97-da14-4df2-a05e-c945f1e0a77b",
+  "id": "ed37f3aa-1e86-4365-920f-36b591a096a6",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -1514,7 +1514,17 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "file_id_evidence_id_organization_id_key": {
+          "name": "file_id_evidence_id_organization_id_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "id",
+            "evidence_id",
+            "organization_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {
         "file_id_format": {
@@ -1524,6 +1534,10 @@
         "file_filename_present": {
           "name": "file_filename_present",
           "value": "\"file\".\"filename\" ~ '[^[:space:]]'"
+        },
+        "file_filename_bytes": {
+          "name": "file_filename_bytes",
+          "value": "octet_length(\"file\".\"filename\") <= 255"
         },
         "file_content_type_shape": {
           "name": "file_content_type_shape",
@@ -1536,6 +1550,170 @@
         "file_checksum_is_sha256": {
           "name": "file_checksum_is_sha256",
           "value": "\"file\".\"checksum\" ~ '^[0-9a-f]{64}$'"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.file_upload": {
+      "name": "file_upload",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "evidence_id": {
+          "name": "evidence_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "filename": {
+          "name": "filename",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content_type": {
+          "name": "content_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "file_id": {
+          "name": "file_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "file_upload_organization_id_expires_at_idx": {
+          "name": "file_upload_organization_id_expires_at_idx",
+          "columns": [
+            {
+              "expression": "organization_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"file_upload\".\"file_id\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "file_upload_evidence_id_organization_id_idx": {
+          "name": "file_upload_evidence_id_organization_id_idx",
+          "columns": [
+            {
+              "expression": "evidence_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "organization_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "file_upload_evidence_fk": {
+          "name": "file_upload_evidence_fk",
+          "tableFrom": "file_upload",
+          "tableTo": "evidence",
+          "columnsFrom": [
+            "evidence_id",
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id",
+            "organization_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "file_upload_file_fk": {
+          "name": "file_upload_file_fk",
+          "tableFrom": "file_upload",
+          "tableTo": "file",
+          "columnsFrom": [
+            "file_id",
+            "evidence_id",
+            "organization_id"
+          ],
+          "columnsTo": [
+            "id",
+            "evidence_id",
+            "organization_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "file_upload_file_id_key": {
+          "name": "file_upload_file_id_key",
+          "nullsNotDistinct": false,
+          "columns": [
+            "file_id"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "file_upload_id_format": {
+          "name": "file_upload_id_format",
+          "value": "\"id\" ~ '^upl_[0-9a-z]{16}$'"
+        },
+        "file_upload_filename_present": {
+          "name": "file_upload_filename_present",
+          "value": "\"file_upload\".\"filename\" ~ '[^[:space:]]'"
+        },
+        "file_upload_filename_bytes": {
+          "name": "file_upload_filename_bytes",
+          "value": "octet_length(\"file_upload\".\"filename\") <= 255"
+        },
+        "file_upload_content_type_shape": {
+          "name": "file_upload_content_type_shape",
+          "value": "\"content_type\" ~ '^[A-Za-z0-9!#$%&*+.^_|~-]+/[A-Za-z0-9!#$%&*+.^_|~-]+$'"
         }
       },
       "isRLSEnabled": false

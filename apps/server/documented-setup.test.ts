@@ -33,7 +33,9 @@
  */
 
 import { readdir, readFile } from "node:fs/promises";
+
 import { fileURLToPath } from "node:url";
+
 import { PGlite } from "@electric-sql/pglite";
 import { assertTenantIsolation, schema } from "@qualityruntime/db";
 import { drizzle } from "drizzle-orm/pglite";
@@ -41,6 +43,7 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { describe, expect, it } from "vite-plus/test";
 import { createApp } from "./app.ts";
 import { createAuth } from "./auth.ts";
+import { attachFile, inMemoryObjectStore } from "./s3-in-memory.ts";
 
 const repository = new URL("../../", import.meta.url);
 const migrationsFolder = fileURLToPath(new URL("packages/db/migrations", repository));
@@ -201,8 +204,10 @@ describe.each(documents)("the setup in $path", ({ path, heading }) => {
     // The server's own start-up check, on the role the document produced.
     await expect(assertTenantIsolation(db)).resolves.toBeUndefined();
 
+    const storage = inMemoryObjectStore();
     const app = createApp({
       db,
+      store: storage.store,
       auth: createAuth(db, {
         baseURL: "http://localhost",
         secret: "test-secret-of-at-least-32-characters",
@@ -259,6 +264,10 @@ describe.each(documents)("the setup in $path", ({ path, heading }) => {
     );
     expect(evidence.status).toBe(201);
     const evidenceId = (await json<{ data: { id: string } }>(evidence)).data.id;
+    const uploaded = await attachFile(storage, request, evidenceId, "the minutes", {
+      filename: "notes.txt",
+    });
+    expect(uploaded.status).toBe(200);
     const read = await request(`/evidence/${evidenceId}`);
     const attested = await request(`/evidence/${evidenceId}/attestation`, {
       method: "PUT",
@@ -389,8 +398,8 @@ describe(".env.example", () => {
    *
    * Found by looking rather than by keeping a list: a list is a thing to forget
    * to add to, and the setting that goes missing from the example is the one
-   * nobody thought about. Source files and the one test that needs a database
-   * of its own; `node_modules` and build output are not ours to scan.
+   * nobody thought about. Source files, and the suites that need something
+   * running of their own; `node_modules` and build output are not ours to scan.
    */
   const named = async () => {
     const found = new Set<string>();

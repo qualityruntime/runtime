@@ -13,6 +13,7 @@
  */
 
 import { fileURLToPath } from "node:url";
+
 import { PGlite } from "@electric-sql/pglite";
 import { schema } from "@qualityruntime/db";
 import { drizzle } from "drizzle-orm/pglite";
@@ -20,6 +21,7 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 import { createApp } from "./app.ts";
 import { createAuth } from "./auth.ts";
+import { inMemoryObjectStore } from "./s3-in-memory.ts";
 
 const migrationsFolder = fileURLToPath(new URL("../../packages/db/migrations", import.meta.url));
 
@@ -84,6 +86,7 @@ beforeAll(async () => {
   await migrate(db, { migrationsFolder });
   app = createApp({
     db,
+    store: inMemoryObjectStore().store,
     auth: createAuth(db, {
       baseURL: "http://localhost",
       secret: "test-secret-of-at-least-32-characters",

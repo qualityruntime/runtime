@@ -15,6 +15,16 @@ import { admin, organization, twoFactor } from "better-auth/plugins";
 type AuthDatabase = Parameters<typeof drizzleAdapter>[0];
 
 /**
+ * The only path a browser sends the session cookie to.
+ *
+ * Exported because it is a security boundary rather than a route detail: the
+ * object store is refused the moment it answers inside this path
+ * (`assertStorageOutsideCookiePath`), and that check must be judging the same
+ * string this sets.
+ */
+export const sessionCookiePath = "/api";
+
+/**
  * The static Better Auth configuration, shared by the runtime and the
  * compatibility test.
  *
@@ -37,9 +47,16 @@ export const authOptions = {
     admin(),
     twoFactor(),
   ],
-  // Identifiers are prefixed and CHECK-enforced, so Better Auth must generate
-  // them through `@qualityruntime/db` or every insert is rejected (ADR 0002).
-  advanced: { database: { generateId } },
+  advanced: {
+    // Identifiers are prefixed and CHECK-enforced, so Better Auth must
+    // generate them through `@qualityruntime/db` or every insert is rejected
+    // (ADR 0002).
+    database: { generateId },
+    // Both attributes keep this cookie off the object store a download
+    // redirects to: the path is every route here, and no `domain` leaves the
+    // cookie host-only. Depth rather than a boundary (ADR 0021).
+    defaultCookieAttributes: { path: sessionCookiePath },
+  },
 } satisfies BetterAuthOptions;
 
 export interface AuthEnvironment {
